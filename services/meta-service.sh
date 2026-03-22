@@ -85,7 +85,7 @@ boot_update() {
     report "boot_update_start" "\"services_dir\":\"${SERVICES_DIR}\""
 
     # First, pull antscihub-pi-managed-services itself
-    local self_dir="/opt/antscihub-pi-managed-services"
+    local self_dir="${SELF_REPO_DIR:-/opt/antscihub-pi-managed-services}"
     if [[ -d "${self_dir}/.git" ]]; then
         local old_head new_head
         old_head=$(git -C "$self_dir" rev-parse HEAD 2>/dev/null || echo "unknown")
@@ -93,7 +93,7 @@ boot_update() {
         if git -C "$self_dir" pull --ff-only 2>&1 | logger -t "$LOG_TAG"; then
             new_head=$(git -C "$self_dir" rev-parse HEAD 2>/dev/null || echo "unknown")
             if [[ "$old_head" != "$new_head" ]]; then
-                report "self_updated" "\"old\":\"${old_head:0:8}\",\"new\":\"${new_head:0:8}\""
+                report "self_updated" "\"old\":\"${old_head:0:8}\",\"new\":\"${new_head:0:8}\",\"source\":\"${self_dir}\""
                 logger -t "$LOG_TAG" "Self-updated, re-running install.sh..."
                 bash "${self_dir}/install.sh" 2>&1 | logger -t "$LOG_TAG"
                 # install.sh will restart this service, so exit cleanly
@@ -103,6 +103,8 @@ boot_update() {
         else
             report "self_pull_failed" "\"dir\":\"${self_dir}\""
         fi
+    else
+        logger -t "$LOG_TAG" "Self-update repo not found at ${self_dir}; skipping self pull"
     fi
 
     # Now pull each managed service

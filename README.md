@@ -27,11 +27,14 @@ A meta service runs on every Pi in the fleet. It is installed at `/opt/antscihub
 4. Continuously (every 30s) ensure each service's systemd unit is running.
 5. Restart services that have stopped.
 6. Report everything over MQTT via `fleet-publish`.
+7. On boot, pull updates for this meta-service itself and reinstall if changed.
 
 You do not need to touch the meta service. You only need to make your repo conform to the contract below.
 
 By default, managed repos can be placed in any top-level folder under `~/Desktop/`.
 If you want a different base path, update `SERVICES_DIR` in `/opt/antscihub-pi-managed-services/config/meta.conf` and restart `antscihub-meta`.
+
+Self-update is enabled by default. `install.sh` sets `SELF_REPO_DIR` in `/opt/antscihub-pi-managed-services/config/meta.conf` to the git-backed folder you installed from, and the meta service runs `git pull --ff-only` there on boot.
 
 ---
 
@@ -106,6 +109,7 @@ GIT_BRANCH=main
 
 ### On Boot
 
+0. Pull `SELF_REPO_DIR` (meta-service repo) and re-run `install.sh` if changed.
 1. Find `~/Desktop/your-repo/antscihub.manifest`.
 2. Read `GIT_REMOTE`.
 3. Run `git pull --ff-only`.

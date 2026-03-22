@@ -57,6 +57,16 @@ if grep -q '^SERVICES_DIR=""' "${INSTALL_DIR}/config/meta.conf" 2>/dev/null; the
     sed -i "s|^SERVICES_DIR=\"\"|SERVICES_DIR=\"${DESKTOP_DIR}\"|" "${INSTALL_DIR}/config/meta.conf"
 fi
 
+# Set SELF_REPO_DIR in config if blank.
+# Prefer the git-backed source path used to run install.sh so self-updates can pull.
+if grep -q '^SELF_REPO_DIR=""' "${INSTALL_DIR}/config/meta.conf" 2>/dev/null; then
+    SELF_REPO_DIR_DEFAULT="${INSTALL_DIR}"
+    if [[ -d "${SCRIPT_DIR}/.git" ]]; then
+        SELF_REPO_DIR_DEFAULT="${SCRIPT_DIR}"
+    fi
+    sed -i "s|^SELF_REPO_DIR=\"\"|SELF_REPO_DIR=\"${SELF_REPO_DIR_DEFAULT}\"|" "${INSTALL_DIR}/config/meta.conf"
+fi
+
 chmod +x "${INSTALL_DIR}/services/meta-service.sh"
 
 # --- Disable Wi-Fi power management ------------------------------------------
