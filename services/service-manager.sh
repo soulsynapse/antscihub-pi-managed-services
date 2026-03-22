@@ -7,7 +7,7 @@ set -uo pipefail
 # Scans SERVICES_DIR for folders containing antscihub.manifest.
 # Ensures each declared systemd service is running.
 # On boot, optionally pulls repos and re-runs install commands.
-# Reports everything encrypted via the fleet MQTT Python client.
+# Reports everything via fleet MQTT client to fleet/services topic.
 # =============================================================================
 
 CONF="/opt/antscihub-pi-service-manager/config/service-manager.conf"
@@ -53,6 +53,7 @@ MQTT_DIR=$(find_mqtt_dir) || {
 
 VENV_PYTHON="${MQTT_DIR}/venv/bin/python3"
 RESPONSE_TOPIC="fleet/response/${DEVICE_ID}"
+SERVICE_TOPIC="fleet/services/${DEVICE_ID}/meta"
 
 logger -t "$LOG_TAG" "MQTT_DIR=${MQTT_DIR} VENV_PYTHON=${VENV_PYTHON}"
 
@@ -67,14 +68,13 @@ report() {
 
     logger -t "$LOG_TAG" "${event}: ${extra_json}"
 
-    # Use Python mqtt_client to publish encrypted
+    # Use Python mqtt_client to publish unencrypted service events
     "$VENV_PYTHON" -c "
 import sys, json, time
 sys.path.insert(0, '${MQTT_DIR}')
 from mqtt_client import fleet, DEVICE_ID
 
 payload = {
-    'schema': 'fleet.service-manager.v1',
     'event': '${event}',
     'device_id': DEVICE_ID,
     'timestamp': ${timestamp},
@@ -85,7 +85,7 @@ payload.update(extra)
 
 fleet.loop_start()
 if fleet.wait_until_connected(timeout=10):
-    fleet.publish('${RESPONSE_TOPIC}', payload, encrypt=True)
+    fleet.publish('${SERVICE_TOPIC}', payload, encrypt=False)
     time.sleep(0.5)
 fleet.loop_stop()
 " 2>/dev/null || logger -t "$LOG_TAG" "WARN: report failed for ${event}"
@@ -104,7 +104,6 @@ sys.path.insert(0, '${MQTT_DIR}')
 from mqtt_client import fleet, DEVICE_ID
 
 payload = {
-    'schema': 'fleet.service-manager.v1',
     'event': 'status',
     'device_id': DEVICE_ID,
     'timestamp': ${timestamp},
@@ -115,7 +114,7 @@ payload.update(extra)
 
 fleet.loop_start()
 if fleet.wait_until_connected(timeout=10):
-    fleet.publish('${RESPONSE_TOPIC}', payload, encrypt=True)
+    fleet.publish('${SERVICE_TOPIC}', payload, encrypt=False)
     time.sleep(0.5)
 fleet.loop_stop()
 " 2>/dev/null || logger -t "$LOG_TAG" "WARN: status report failed"
