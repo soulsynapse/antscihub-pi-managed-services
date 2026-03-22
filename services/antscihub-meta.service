@@ -1,0 +1,21 @@
+[Unit]
+Description=antscihub Meta Service — monitors and maintains managed services
+After=network-online.target fleet-shell.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/opt/antscihub-pi-managed-services/services/meta-service.sh
+Restart=always
+RestartSec=10
+WatchdogSec=120
+User=root
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# Hardening
+ProtectSystem=full
+NoNewPrivileges=false
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
