@@ -7,8 +7,8 @@ A single meta-service that monitors and maintains other services on a Raspberry 
 From any Pi (via fleet shell or SSH):
 
 ```bash
-sudo git clone https://github.com/soulsynapse/antscihub-pi-managed-services.git ~/Desktop/2-MANAGED-SERVICES/antscihub-pi-managed-services
-sudo bash ~/Desktop/2-MANAGED-SERVICES/antscihub-pi-managed-services/install.sh
+sudo git clone https://github.com/soulsynapse/antscihub-pi-managed-services.git ~/Desktop/antscihub-pi-managed-services
+sudo bash ~/Desktop/antscihub-pi-managed-services/install.sh
 ```
 
 ## Agent Instructions for Downstream Services and Repos
@@ -21,7 +21,7 @@ sudo bash ~/Desktop/2-MANAGED-SERVICES/antscihub-pi-managed-services/install.sh
 
 A meta service runs on every Pi in the fleet. It is installed at `/opt/antscihub-pi-managed-services/`. Its job is:
 
-1. On every boot, scan `~/Desktop/2-MANAGED-SERVICES/` for managed service folders.
+1. On every boot, scan `~/Desktop/` for managed service folders.
 2. `git pull` each one.
 3. If code changed, run the service's install command.
 4. Continuously (every 30s) ensure each service's systemd unit is running.
@@ -30,15 +30,20 @@ A meta service runs on every Pi in the fleet. It is installed at `/opt/antscihub
 
 You do not need to touch the meta service. You only need to make your repo conform to the contract below.
 
+By default, managed repos can be placed in any top-level folder under `~/Desktop/`.
+If you want a different base path, update `SERVICES_DIR` in `/opt/antscihub-pi-managed-services/config/meta.conf` and restart `antscihub-meta`.
+
 ---
 
 ## How to Make Your Repo a Managed Service
 
-### 1. Clone into `~/Desktop/2-MANAGED-SERVICES/<your-folder-name>/`
+### 1. Clone into `~/Desktop/<your-folder-name>/`
 
 ```bash
-git clone https://github.com/org/your-repo.git ~/Desktop/2-MANAGED-SERVICES/your-repo
+git clone https://github.com/org/your-repo.git ~/Desktop/your-repo
 ```
+
+This is the default configured by `install.sh`. You can choose a different base folder by changing `SERVICES_DIR` in `meta.conf`.
 
 ### 2. Add `antscihub.manifest` at the repo root
 
@@ -101,7 +106,7 @@ GIT_BRANCH=main
 
 ### On Boot
 
-1. Find `~/Desktop/2-MANAGED-SERVICES/your-repo/antscihub.manifest`.
+1. Find `~/Desktop/your-repo/antscihub.manifest`.
 2. Read `GIT_REMOTE`.
 3. Run `git pull --ff-only`.
 4. If `HEAD` changed:
@@ -111,7 +116,7 @@ GIT_BRANCH=main
 
 ### Continuously (Every 30 Seconds)
 
-1. Find `~/Desktop/2-MANAGED-SERVICES/your-repo/antscihub.manifest`.
+1. Find `~/Desktop/your-repo/antscihub.manifest`.
 2. Read `SERVICE_NAME`.
 3. Run `systemctl is-active SERVICE_NAME`.
 4. If active: move on.
@@ -298,5 +303,5 @@ while True:
 - [ ] Your install script is idempotent.
 - [ ] Your `.service` file uses absolute paths.
 - [ ] Your `.service` file has `Restart=on-failure` or `Restart=always`.
-- [ ] Repo is cloned to `~/Desktop/2-MANAGED-SERVICES/<folder-name>/`.
+- [ ] Repo is cloned to `~/Desktop/<folder-name>/`.
 
