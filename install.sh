@@ -68,19 +68,20 @@ install_modules() {
 
         local resolved_target
         resolved_target="$(expand_module_path "$target_path")"
+        log "Module target resolved: ${target_path} -> ${resolved_target}"
 
         mkdir -p "$(dirname "${resolved_target}")"
 
         if [[ -d "${resolved_target}/.git" ]]; then
             log "Updating module: ${repo_url} -> ${resolved_target}"
-            if ! git -C "${resolved_target}" pull --ff-only >/dev/null 2>&1; then
+            if ! git -C "${resolved_target}" pull --ff-only; then
                 warn "Failed to update ${resolved_target}; continuing"
             fi
         elif [[ -e "${resolved_target}" ]]; then
             # Allow cloning into a pre-created but empty directory.
             if [[ -d "${resolved_target}" ]] && [[ -z "$(find "${resolved_target}" -mindepth 1 -maxdepth 1 2>/dev/null)" ]]; then
                 log "Cloning module into existing empty dir: ${repo_url} -> ${resolved_target}"
-                if ! git clone "${repo_url}" "${resolved_target}" >/dev/null 2>&1; then
+                if ! git clone "${repo_url}" "${resolved_target}"; then
                     warn "Failed to clone ${repo_url} into ${resolved_target}; continuing"
                     continue
                 fi
@@ -90,8 +91,9 @@ install_modules() {
                 continue
             fi
         else
+            mkdir -p "${resolved_target}"
             log "Cloning module: ${repo_url} -> ${resolved_target}"
-            if ! git clone "${repo_url}" "${resolved_target}" >/dev/null 2>&1; then
+            if ! git clone "${repo_url}" "${resolved_target}"; then
                 warn "Failed to clone ${repo_url} into ${resolved_target}; continuing"
                 continue
             fi
@@ -173,7 +175,7 @@ log "  ✓ antscihub-meta enabled and started"
 
 # --- Report -------------------------------------------------------------------
 
-fleet-publish --topic "fleet/managed-services/$(hostname)/install" \
+fleet-publish --topic "fleet/services/$(hostname)/install" \
     --json "{\"event\":\"meta_installed\",\"version\":\"$(git -C "${SCRIPT_DIR}" rev-parse --short HEAD 2>/dev/null || echo unknown)\"}" \
     2>/dev/null || true
 

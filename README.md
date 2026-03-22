@@ -152,7 +152,7 @@ GIT_BRANCH=main
 
 ## MQTT Reporting
 
-The meta service publishes to `fleet/managed-services/<DEVICE_ID>/meta` via `fleet-publish`.
+The meta service publishes to `fleet/services/<DEVICE_ID>/meta` via `fleet-publish`.
 
 Events relevant to your service:
 
