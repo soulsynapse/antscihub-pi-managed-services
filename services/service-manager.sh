@@ -2,16 +2,16 @@
 set -uo pipefail
 
 # =============================================================================
-# antscihub meta-service
+# antscihub service-manager
 #
 # Scans SERVICES_DIR for folders containing antscihub.manifest.
 # Ensures each declared systemd service is running.
 # On boot, optionally pulls repos and re-runs install commands.
-# Reports everything via fleet-publish.
+# Reports everything encrypted via the fleet MQTT Python client.
 # =============================================================================
 
-CONF="/opt/antscihub-pi-service-manager/config/meta.conf"
-LOG_TAG="antscihub-meta"
+CONF="/opt/antscihub-pi-service-manager/config/service-manager.conf"
+LOG_TAG="antscihub-service-manager"
 
 # --- Load config --------------------------------------------------------------
 
@@ -22,36 +22,113 @@ fi
 source "$CONF"
 
 DEVICE_ID="${DEVICE_ID:-$(hostname)}"
-SERVICES_DIR="${SERVICES_DIR:?SERVICES_DIR not set in meta.conf}"
+SERVICES_DIR="${SERVICES_DIR:?SERVICES_DIR not set in service-manager.conf}"
 CHECK_INTERVAL="${CHECK_INTERVAL:-30}"
 RESTART_THRESHOLD="${RESTART_THRESHOLD:-3}"
 MAX_RESTART_ATTEMPTS="${MAX_RESTART_ATTEMPTS:-5}"
 PULL_ON_BOOT="${PULL_ON_BOOT:-true}"
-TOPIC_PREFIX="${MQTT_TOPIC_PREFIX:-fleet/services}/${DEVICE_ID}/meta"
+
+# --- Locate MQTT Python environment ------------------------------------------
+
+# Find the fleet-shell MQTT directory
+find_mqtt_dir() {
+    # Check common locations
+    for candidate in \
+        "/home/*/Desktop/1-MQTT" \
+        "/home/*/1-MQTT"; do
+        for dir in $candidate; do
+            if [[ -f "${dir}/mqtt_client.py" && -f "${dir}/venv/bin/python3" ]]; then
+                echo "$dir"
+                return 0
+            fi
+        done
+    done
+    return 1
+}
+
+MQTT_DIR=$(find_mqtt_dir) || {
+    logger -t "$LOG_TAG" "FATAL: Cannot find MQTT directory (1-MQTT with mqtt_client.py)"
+    exit 1
+}
+
+VENV_PYTHON="${MQTT_DIR}/venv/bin/python3"
+RESPONSE_TOPIC="fleet/response/${DEVICE_ID}"
+
+logger -t "$LOG_TAG" "MQTT_DIR=${MQTT_DIR} VENV_PYTHON=${VENV_PYTHON}"
 
 # --- Helpers ------------------------------------------------------------------
 
 report() {
     local event="$1"
     shift
-    local json="$1"
-    logger -t "$LOG_TAG" "${event}: ${json}"
-    fleet-publish --topic "${TOPIC_PREFIX}" \
-    --json "{\"event\":\"${event}\",${json}}" \
-        2>/dev/null || logger -t "$LOG_TAG" "WARN: fleet-publish failed for ${event}"
+    local extra_json="$1"
+    local timestamp
+    timestamp=$(date +%s.%3N)
+
+    logger -t "$LOG_TAG" "${event}: ${extra_json}"
+
+    # Use Python mqtt_client to publish encrypted
+    "$VENV_PYTHON" -c "
+import sys, json, time
+sys.path.insert(0, '${MQTT_DIR}')
+from mqtt_client import fleet, DEVICE_ID
+
+payload = {
+    'schema': 'fleet.service-manager.v1',
+    'event': '${event}',
+    'device_id': DEVICE_ID,
+    'timestamp': ${timestamp},
+}
+
+extra = json.loads('''${extra_json}''')
+payload.update(extra)
+
+fleet.loop_start()
+if fleet.wait_until_connected(timeout=10):
+    fleet.publish('${RESPONSE_TOPIC}', payload, encrypt=True)
+    time.sleep(0.5)
+fleet.loop_stop()
+" 2>/dev/null || logger -t "$LOG_TAG" "WARN: report failed for ${event}"
+}
+
+# Lightweight report for frequent status updates — keeps a persistent connection
+# instead of connecting/disconnecting every time
+report_status() {
+    local json_payload="$1"
+    local timestamp
+    timestamp=$(date +%s.%3N)
+
+    "$VENV_PYTHON" -c "
+import sys, json, time
+sys.path.insert(0, '${MQTT_DIR}')
+from mqtt_client import fleet, DEVICE_ID
+
+payload = {
+    'schema': 'fleet.service-manager.v1',
+    'event': 'status',
+    'device_id': DEVICE_ID,
+    'timestamp': ${timestamp},
+}
+
+extra = json.loads('''${json_payload}''')
+payload.update(extra)
+
+fleet.loop_start()
+if fleet.wait_until_connected(timeout=10):
+    fleet.publish('${RESPONSE_TOPIC}', payload, encrypt=True)
+    time.sleep(0.5)
+fleet.loop_stop()
+" 2>/dev/null || logger -t "$LOG_TAG" "WARN: status report failed"
 }
 
 parse_manifest() {
-    # Reads a manifest file into associative array passed by nameref
     local manifest_path="$1"
     local -n _out="$2"
 
     _out=()
     while IFS='=' read -r key value; do
-        # Skip comments and blanks
         [[ "$key" =~ ^[[:space:]]*# ]] && continue
         [[ -z "$key" ]] && continue
-        # Trim whitespace
         key=$(echo "$key" | xargs)
         value=$(echo "$value" | xargs)
         _out["$key"]="$value"
@@ -59,7 +136,6 @@ parse_manifest() {
 }
 
 discover_services() {
-    # Returns list of directories under SERVICES_DIR that have antscihub.manifest
     local found=()
     for dir in "${SERVICES_DIR}"/*/; do
         [[ -f "${dir}antscihub.manifest" ]] && found+=("$dir")
@@ -69,9 +145,9 @@ discover_services() {
 
 # --- Associative arrays for tracking state ------------------------------------
 
-declare -A FAIL_COUNTS          # service_name -> consecutive check failures
-declare -A RESTART_ATTEMPTS     # service_name -> consecutive restart attempts
-declare -A GAVE_UP              # service_name -> 1 if we stopped trying
+declare -A FAIL_COUNTS
+declare -A RESTART_ATTEMPTS
+declare -A GAVE_UP
 
 # --- Boot phase: pull repos and run install -----------------------------------
 
@@ -82,29 +158,28 @@ boot_update() {
     fi
 
     logger -t "$LOG_TAG" "Boot phase: pulling repos..."
-    report "boot_update_start" "\"services_dir\":\"${SERVICES_DIR}\""
+    report "boot_update_start" "{\"services_dir\": \"${SERVICES_DIR}\"}"
 
     # First, pull antscihub-pi-service-manager itself
     local self_dir="${SELF_REPO_DIR:-/opt/antscihub-pi-service-manager}"
     if [[ -d "${self_dir}/.git" ]]; then
         local old_head new_head
         old_head=$(git -C "$self_dir" rev-parse HEAD 2>/dev/null || echo "unknown")
-        
+
         if git -C "$self_dir" pull --ff-only 2>&1 | logger -t "$LOG_TAG"; then
             new_head=$(git -C "$self_dir" rev-parse HEAD 2>/dev/null || echo "unknown")
             if [[ "$old_head" != "$new_head" ]]; then
-                report "self_updated" "\"old\":\"${old_head:0:8}\",\"new\":\"${new_head:0:8}\",\"source\":\"${self_dir}\""
+                report "self_update_done" "{\"success\": true, \"old\": \"${old_head:0:8}\", \"new\": \"${new_head:0:8}\", \"source\": \"${self_dir}\"}"
                 logger -t "$LOG_TAG" "Self-updated, re-running install.sh..."
                 bash "${self_dir}/install.sh" 2>&1 | logger -t "$LOG_TAG"
-                # install.sh will restart this service, so exit cleanly
-                report "self_reinstalled" "\"head\":\"${new_head:0:8}\""
+                report "self_reinstalled" "{\"head\": \"${new_head:0:8}\"}"
                 exit 0
             fi
         else
-            report "self_pull_failed" "\"dir\":\"${self_dir}\""
+            report "self_update_done" "{\"success\": false, \"error\": \"git pull failed\", \"dir\": \"${self_dir}\"}"
         fi
     else
-        logger -t "$LOG_TAG" "Self-update repo not found at ${self_dir}; skipping self pull"
+        logger -t "$LOG_TAG" "Self-update repo not found at ${self_dir}; skipping"
     fi
 
     # Now pull each managed service
@@ -122,14 +197,16 @@ boot_update() {
         folder_name=$(basename "$dir")
 
         if [[ -z "$remote" ]]; then
-            logger -t "$LOG_TAG" "No GIT_REMOTE in ${folder_name}/antscihub.manifest, skipping pull"
+            logger -t "$LOG_TAG" "No GIT_REMOTE in ${folder_name}, skipping pull"
             continue
         fi
 
         if [[ ! -d "${dir}.git" ]]; then
-            logger -t "$LOG_TAG" "${folder_name} has GIT_REMOTE but is not a git repo, skipping"
+            logger -t "$LOG_TAG" "${folder_name} not a git repo, skipping"
             continue
         fi
+
+        report "service_update_start" "{\"service\": \"${folder_name}\"}"
 
         local old_head new_head
         old_head=$(git -C "$dir" rev-parse HEAD 2>/dev/null || echo "unknown")
@@ -138,30 +215,32 @@ boot_update() {
             new_head=$(git -C "$dir" rev-parse HEAD 2>/dev/null || echo "unknown")
 
             if [[ "$old_head" != "$new_head" ]]; then
-                report "repo_updated" "\"service\":\"${folder_name}\",\"old\":\"${old_head:0:8}\",\"new\":\"${new_head:0:8}\""
+                report "service_update_done" "{\"success\": true, \"service\": \"${folder_name}\", \"old\": \"${old_head:0:8}\", \"new\": \"${new_head:0:8}\"}"
 
                 if [[ -n "$install_cmd" && "$install_cmd" != "none" ]]; then
                     logger -t "$LOG_TAG" "Running install for ${folder_name}: ${install_cmd}"
+                    local install_exit=0
                     if (cd "$dir" && bash -c "$install_cmd") 2>&1 | logger -t "$LOG_TAG"; then
-                        report "install_ok" "\"service\":\"${folder_name}\",\"cmd\":\"${install_cmd}\""
+                        report "service_install_done" "{\"success\": true, \"service\": \"${folder_name}\", \"cmd\": \"${install_cmd}\"}"
                     else
-                        report "install_failed" "\"service\":\"${folder_name}\",\"cmd\":\"${install_cmd}\",\"exit_code\":$?"
+                        install_exit=$?
+                        report "service_install_done" "{\"success\": false, \"service\": \"${folder_name}\", \"cmd\": \"${install_cmd}\", \"exit_code\": ${install_exit}}"
                     fi
                 fi
 
-                # Restart the service if it has one
                 if [[ -n "$svc" && "$svc" != "none" ]]; then
                     systemctl restart "$svc" 2>&1 | logger -t "$LOG_TAG" || true
                 fi
             else
-                logger -t "$LOG_TAG" "${folder_name}: already up to date (${old_head:0:8})"
+                logger -t "$LOG_TAG" "${folder_name}: up to date (${old_head:0:8})"
+                report "service_update_done" "{\"success\": true, \"service\": \"${folder_name}\", \"changed\": false}"
             fi
         else
-            report "pull_failed" "\"service\":\"${folder_name}\",\"remote\":\"${remote}\""
+            report "service_update_done" "{\"success\": false, \"error\": \"git pull failed\", \"service\": \"${folder_name}\", \"remote\": \"${remote}\"}"
         fi
     done
 
-    report "boot_update_done" "\"status\":\"complete\""
+    report "boot_update_done" "{\"status\": \"complete\"}"
 }
 
 # --- Main loop: monitor services ----------------------------------------------
@@ -170,8 +249,8 @@ check_services() {
     local dirs
     dirs=$(discover_services)
 
-    local managed_count=0
-    local healthy_count=0
+    local managed=()
+    local healthy=()
     local unhealthy=()
 
     for dir in $dirs; do
@@ -188,11 +267,10 @@ check_services() {
             continue
         fi
 
-        managed_count=$((managed_count + 1))
+        managed+=("$svc")
 
-        # Check if active
         if systemctl is-active --quiet "$svc" 2>/dev/null; then
-            healthy_count=$((healthy_count + 1))
+            healthy+=("$svc")
             FAIL_COUNTS["$svc"]=0
             RESTART_ATTEMPTS["$svc"]=0
             GAVE_UP["$svc"]=0
@@ -205,13 +283,12 @@ check_services() {
         FAIL_COUNTS["$svc"]=$fails
 
         if [[ "${GAVE_UP["$svc"]:-0}" == "1" ]]; then
-            # Already gave up, just keep reporting
             unhealthy+=("$svc")
             continue
         fi
 
         if [[ "$no_restart" == "true" ]]; then
-            report "service_down" "\"service\":\"${svc}\",\"folder\":\"${folder_name}\",\"auto_restart\":false,\"consecutive_failures\":${fails}"
+            report "service_down" "{\"service\": \"${svc}\", \"folder\": \"${folder_name}\", \"auto_restart\": false, \"consecutive_failures\": ${fails}}"
             unhealthy+=("$svc")
             continue
         fi
@@ -223,54 +300,63 @@ check_services() {
 
             if [[ "$attempts" -gt "$MAX_RESTART_ATTEMPTS" ]]; then
                 GAVE_UP["$svc"]=1
-                report "service_gave_up" "\"service\":\"${svc}\",\"folder\":\"${folder_name}\",\"restart_attempts\":${attempts}"
+                report "service_gave_up" "{\"service\": \"${svc}\", \"folder\": \"${folder_name}\", \"restart_attempts\": ${attempts}}"
                 unhealthy+=("$svc")
                 continue
             fi
 
-            report "service_restarting" "\"service\":\"${svc}\",\"folder\":\"${folder_name}\",\"attempt\":${attempts},\"consecutive_failures\":${fails}"
+            report "service_restart" "{\"service\": \"${svc}\", \"folder\": \"${folder_name}\", \"reason\": \"consecutive failures: ${fails}\", \"attempt\": ${attempts}}"
 
             if systemctl restart "$svc" 2>&1 | logger -t "$LOG_TAG"; then
                 FAIL_COUNTS["$svc"]=0
-                # Wait grace period before checking again
                 sleep "$grace"
 
                 if systemctl is-active --quiet "$svc" 2>/dev/null; then
-                    report "service_recovered" "\"service\":\"${svc}\",\"folder\":\"${folder_name}\",\"attempt\":${attempts}"
+                    report "service_recovered" "{\"service\": \"${svc}\", \"folder\": \"${folder_name}\", \"attempt\": ${attempts}}"
                     RESTART_ATTEMPTS["$svc"]=0
-                    healthy_count=$((healthy_count + 1))
+                    healthy+=("$svc")
                     continue
                 else
-                    report "service_restart_failed" "\"service\":\"${svc}\",\"folder\":\"${folder_name}\",\"attempt\":${attempts}"
+                    report "service_restart_failed" "{\"service\": \"${svc}\", \"folder\": \"${folder_name}\", \"attempt\": ${attempts}}"
                     unhealthy+=("$svc")
                 fi
             else
-                report "service_restart_error" "\"service\":\"${svc}\",\"folder\":\"${folder_name}\",\"attempt\":${attempts}"
+                report "service_restart_error" "{\"service\": \"${svc}\", \"folder\": \"${folder_name}\", \"attempt\": ${attempts}}"
                 unhealthy+=("$svc")
             fi
         else
-            # Below threshold, just note it
             logger -t "$LOG_TAG" "${svc} not active (failure ${fails}/${RESTART_THRESHOLD})"
             unhealthy+=("$svc")
         fi
     done
 
-    # Periodic summary
+    # Build JSON arrays
+    local managed_json="[]"
+    if [[ ${#managed[@]} -gt 0 ]]; then
+        managed_json=$(printf '"%s",' "${managed[@]}")
+        managed_json="[${managed_json%,}]"
+    fi
+        local healthy_json="[]"
+    if [[ ${#healthy[@]} -gt 0 ]]; then
+        healthy_json=$(printf '"%s",' "${healthy[@]}")
+        healthy_json="[${healthy_json%,}]"
+    fi
+
     local unhealthy_json="[]"
     if [[ ${#unhealthy[@]} -gt 0 ]]; then
         unhealthy_json=$(printf '"%s",' "${unhealthy[@]}")
         unhealthy_json="[${unhealthy_json%,}]"
     fi
 
-    report "status" "\"managed\":${managed_count},\"healthy\":${healthy_count},\"unhealthy\":${unhealthy_json}"
+    report_status "{\"managed\": ${managed_json}, \"healthy\": ${healthy_json}, \"unhealthy\": ${unhealthy_json}}"
 }
 
 # --- Entrypoint ---------------------------------------------------------------
 
-logger -t "$LOG_TAG" "Starting meta-service (pid $$)"
-report "started" "\"services_dir\":\"${SERVICES_DIR}\",\"check_interval\":${CHECK_INTERVAL}"
+logger -t "$LOG_TAG" "Starting service-manager (pid $$)"
+report "boot_start" "{\"services_dir\": \"${SERVICES_DIR}\", \"check_interval\": ${CHECK_INTERVAL}}"
 
-# Wait for network and fleet-publish to be available
+# Wait for network and MQTT to be available
 sleep 5
 
 # Boot phase

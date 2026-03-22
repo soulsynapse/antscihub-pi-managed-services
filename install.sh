@@ -3,7 +3,8 @@ set -euo pipefail
 
 # =============================================================================
 # antscihub-pi-service-manager installer
-# Installs the meta service and bootstraps configured module repos. Safe to re-run.
+# Installs the service manager and bootstraps configured module repos.
+# Safe to re-run.
 # Usage: sudo bash install.sh
 # =============================================================================
 
@@ -30,11 +31,15 @@ REAL_HOME=$(eval echo "~${REAL_USER}")
 DESKTOP_DIR="${REAL_HOME}/Desktop"
 MANAGER_REPO_DIR="${DESKTOP_DIR}/2-SERVICE-MANAGER"
 
+MQTT_DIR="${DESKTOP_DIR}/1-MQTT"
+VENV_PYTHON="${MQTT_DIR}/venv/bin/python3"
+
 log "User=${REAL_USER} Home=${REAL_HOME} Desktop=${DESKTOP_DIR}"
+
+# ─── Helpers ──────────────────────────────────────────────────────────────────
 
 expand_module_path() {
     local raw_path="$1"
-    # Normalize common formatting artifacts from config files.
     raw_path="${raw_path//$'\r'/}"
     raw_path="${raw_path#\"}"
     raw_path="${raw_path%\"}"
@@ -43,7 +48,6 @@ expand_module_path() {
 
     case "$raw_path" in
         '~/'*)
-            # Use substring expansion to skip the first 2 characters (~/)
             echo "${REAL_HOME}/${raw_path:2}"
             ;;
         "\$HOME/"*)
@@ -67,7 +71,6 @@ install_modules() {
     log "Bootstrapping modules from ${MODULES_FILE}..."
 
     while IFS='|' read -r repo_url target_path; do
-        # Skip comments and blank lines
         [[ -z "${repo_url// /}" ]] && continue
         [[ "${repo_url}" =~ ^[[:space:]]*# ]] && continue
 
@@ -82,9 +85,7 @@ install_modules() {
         local resolved_target
         resolved_target="$(expand_module_path "$target_path")"
 
-        # Safety net: never allow literal ~/ paths to pass through unresolved.
         if [[ "$resolved_target" == '~/'* ]]; then
-            # Use substring expansion to skip the first 2 characters (~/)
             resolved_target="${REAL_HOME}/${resolved_target:2}"
         fi
 
@@ -98,7 +99,6 @@ install_modules() {
                 warn "Failed to update ${resolved_target}; continuing"
             fi
         elif [[ -e "${resolved_target}" ]]; then
-            # Allow cloning into a pre-created but empty directory.
             if [[ -d "${resolved_target}" ]] && [[ -z "$(find "${resolved_target}" -mindepth 1 -maxdepth 1 2>/dev/null)" ]]; then
                 log "Cloning module into existing empty dir: ${repo_url} -> ${resolved_target}"
                 if ! git clone "${repo_url}" "${resolved_target}"; then
@@ -125,10 +125,23 @@ install_modules() {
     done < "${MODULES_FILE}"
 }
 
-# --- Preflight ----------------------------------------------------------------
+# ─── Preflight ────────────────────────────────────────────────────────────────
 
-if ! command -v fleet-publish &>/dev/null; then
-    err "fleet-publish not found. Is fleet-shell installed?"
+if [[ ! -d "${MQTT_DIR}" ]]; then
+    err "MQTT directory not found at ${MQTT_DIR}"
+    err "Is fleet-shell installed? Run the fleet-shell installer first."
+    exit 1
+fi
+
+if [[ ! -f "${VENV_PYTHON}" ]]; then
+    err "Python venv not found at ${VENV_PYTHON}"
+    err "Is fleet-shell installed correctly?"
+    exit 1
+fi
+
+if ! "${VENV_PYTHON}" -c "import paho.mqtt.client; from cryptography.fernet import Fernet" 2>/dev/null; then
+    err "MQTT venv missing required packages"
+    err "Re-run fleet-shell installer or: ${MQTT_DIR}/venv/bin/pip install paho-mqtt cryptography python-dotenv"
     exit 1
 fi
 
@@ -137,37 +150,56 @@ if ! command -v git &>/dev/null; then
     apt-get update -qq && apt-get install -y -qq git > /dev/null 2>&1
 fi
 
-# Bootstrap configured module repositories before setting up service.
+# Bootstrap modules before setting up service
 install_modules
 
-# --- Copy files ---------------------------------------------------------------
+# ─── Stop old service ─────────────────────────────────────────────────────────
+
+# Stop old meta service if it exists
+systemctl stop antscihub-meta 2>/dev/null || true
+systemctl disable antscihub-meta 2>/dev/null || true
+rm -f /etc/systemd/system/antscihub-meta.service
+
+# Stop service-manager if already running
+systemctl stop antscihub-service-manager 2>/dev/null || true
+
+# ─── Copy files ───────────────────────────────────────────────────────────────
 
 log "Installing to ${INSTALL_DIR}..."
 mkdir -p "${INSTALL_DIR}/config"
 mkdir -p "${INSTALL_DIR}/services"
 mkdir -p "${MANAGER_REPO_DIR}"
 
-# Copy everything except .git
 rsync -a --exclude='.git' --exclude='.gitignore' "${SCRIPT_DIR}/" "${INSTALL_DIR}/"
 
-# Set SERVICES_DIR in config if blank
-if grep -q '^SERVICES_DIR=""' "${INSTALL_DIR}/config/meta.conf" 2>/dev/null; then
-    sed -i "s|^SERVICES_DIR=\"\"|SERVICES_DIR=\"${DESKTOP_DIR}\"|" "${INSTALL_DIR}/config/meta.conf"
+# Remove old meta files if present
+rm -f "${INSTALL_DIR}/services/meta-service.sh"
+rm -f "${INSTALL_DIR}/services/antscihub-meta.service"
+rm -f "${INSTALL_DIR}/config/meta.conf"
+
+chmod +x "${INSTALL_DIR}/services/service-manager.sh"
+
+# Migrate meta.conf → service-manager.conf if needed
+if [[ -f "${INSTALL_DIR}/config/meta.conf" && ! -f "${INSTALL_DIR}/config/service-manager.conf" ]]; then
+    log "Migrating meta.conf → service-manager.conf"
+    mv "${INSTALL_DIR}/config/meta.conf" "${INSTALL_DIR}/config/service-manager.conf"
 fi
 
-# Set SELF_REPO_DIR in config if blank.
-# Prefer the git-backed source path used to run install.sh so self-updates can pull.
-if grep -q '^SELF_REPO_DIR=""' "${INSTALL_DIR}/config/meta.conf" 2>/dev/null; then
+# Set SERVICES_DIR in config if blank
+if grep -q '^SERVICES_DIR=""' "${INSTALL_DIR}/config/service-manager.conf" 2>/dev/null; then
+    sed -i "s|^SERVICES_DIR=\"\"|SERVICES_DIR=\"${DESKTOP_DIR}\"|" "${INSTALL_DIR}/config/service-manager.conf"
+fi
+
+# Set SELF_REPO_DIR in config if blank
+if grep -q '^SELF_REPO_DIR=""' "${INSTALL_DIR}/config/service-manager.conf" 2>/dev/null; then
     SELF_REPO_DIR_DEFAULT="${INSTALL_DIR}"
     if [[ -d "${SCRIPT_DIR}/.git" ]]; then
         SELF_REPO_DIR_DEFAULT="${SCRIPT_DIR}"
     fi
-    sed -i "s|^SELF_REPO_DIR=\"\"|SELF_REPO_DIR=\"${SELF_REPO_DIR_DEFAULT}\"|" "${INSTALL_DIR}/config/meta.conf"
+    sed -i "s|^SELF_REPO_DIR=\"\"|SELF_REPO_DIR=\"${SELF_REPO_DIR_DEFAULT}\"|" "${INSTALL_DIR}/config/service-manager.conf"
 fi
 
-chmod +x "${INSTALL_DIR}/services/meta-service.sh"
-
-# --- Disable Wi-Fi power management ------------------------------------------
+# ─── Disable Wi-Fi power management ──────────────────────────────────────────
 
 log "Disabling Wi-Fi power management..."
 
@@ -183,30 +215,51 @@ EOF
 
 ip link show wlan0 &>/dev/null && iwconfig wlan0 power off 2>/dev/null || true
 
-# --- Install systemd unit -----------------------------------------------------
+# ─── Install systemd unit ────────────────────────────────────────────────────
 
 log "Installing systemd service..."
-cp "${INSTALL_DIR}/services/antscihub-meta.service" /etc/systemd/system/
+
+cp "${INSTALL_DIR}/services/antscihub-service-manager.service" /etc/systemd/system/
 
 systemctl daemon-reload
-systemctl enable --now antscihub-meta.service
+systemctl enable --now antscihub-service-manager.service
 
-log "  ✓ antscihub-meta enabled and started"
+sleep 3
+if systemctl is-active --quiet antscihub-service-manager; then
+    log "  ✓ antscihub-service-manager running"
+else
+    err "  ✗ antscihub-service-manager failed to start"
+    journalctl -u antscihub-service-manager --no-pager -n 20 || true
+fi
 
-# --- Report -------------------------------------------------------------------
+# ─── Report install ──────────────────────────────────────────────────────────
 
-fleet-publish --topic "fleet/services/$(hostname)/install" \
-    --json "{\"event\":\"meta_installed\",\"version\":\"$(git -C "${SCRIPT_DIR}" rev-parse --short HEAD 2>/dev/null || echo unknown)\"}" \
-    2>/dev/null || true
+"${VENV_PYTHON}" -c "
+import sys, time
+sys.path.insert(0, '${MQTT_DIR}')
+from mqtt_client import fleet, DEVICE_ID
+fleet.loop_start()
+if fleet.wait_until_connected(timeout=10):
+    fleet.publish('fleet/response/' + DEVICE_ID, {
+        'schema': 'fleet.service-manager.v1',
+        'event': 'service_manager_installed',
+        'device_id': DEVICE_ID,
+        'timestamp': time.time(),
+        'version': '$(git -C "${SCRIPT_DIR}" rev-parse --short HEAD 2>/dev/null || echo unknown)',
+        'install_dir': '${INSTALL_DIR}',
+    }, encrypt=True)
+    time.sleep(1)
+fleet.loop_stop()
+" 2>/dev/null || warn "Install report failed (non-critical)"
 
-# --- Done ---------------------------------------------------------------------
+# ─── Done ─────────────────────────────────────────────────────────────────────
 
 log "============================================"
 log " antscihub-pi-service-manager installed!"
 log ""
-log " Config:  ${INSTALL_DIR}/config/meta.conf"
-log " Logs:    journalctl -t antscihub-meta -f"
-log " Status:  systemctl status antscihub-meta"
+log " Config:  ${INSTALL_DIR}/config/service-manager.conf"
+log " Logs:    journalctl -u antscihub-service-manager -f"
+log " Status:  systemctl status antscihub-service-manager"
 log ""
 log " To add a managed service, place a folder"
 log " in ${DESKTOP_DIR}/ with an"

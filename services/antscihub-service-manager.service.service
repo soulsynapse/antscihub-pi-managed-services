@@ -1,11 +1,11 @@
 [Unit]
-Description=antscihub Meta Service — monitors and maintains managed services
+Description=antscihub Service Manager — monitors and maintains managed services
 After=network-online.target fleet-shell.service
 Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/opt/antscihub-pi-service-manager/services/meta-service.sh
+ExecStart=/opt/antscihub-pi-service-manager/services/service-manager.sh
 Restart=always
 RestartSec=10
 WatchdogSec=120
