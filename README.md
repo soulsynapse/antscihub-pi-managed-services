@@ -11,6 +11,8 @@ sudo git clone https://github.com/soulsynapse/antscihub-pi-managed-services.git 
 sudo bash ~/Desktop/antscihub-pi-managed-services/install.sh
 ```
 
+During install, module repos listed in `config/modules.conf` are also cloned or updated.
+
 ## Agent Instructions for Downstream Services and Repos
 
 ---
@@ -35,6 +37,14 @@ By default, managed repos can be placed in any top-level folder under `~/Desktop
 If you want a different base path, update `SERVICES_DIR` in `/opt/antscihub-pi-managed-services/config/meta.conf` and restart `antscihub-meta`.
 
 Self-update is enabled by default. `install.sh` sets `SELF_REPO_DIR` in `/opt/antscihub-pi-managed-services/config/meta.conf` to the git-backed folder you installed from, and the meta service runs `git pull --ff-only` there on boot.
+
+Module bootstrap is enabled by default. `install.sh` reads `config/modules.conf` and for each `REPO_URL|TARGET_PATH` entry it clones the repo if missing, or runs `git pull --ff-only` if already present.
+
+Default module file example:
+
+```text
+https://github.com/soulsynapse/antscihub-pi-wifi-watchdog|~/Desktop/3-SYSTEM/wifi-watchdog
+```
 
 ---
 
