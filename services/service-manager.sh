@@ -139,7 +139,6 @@ boot_update() {
 
         # Reset any local changes before pulling
         git -C "$self_dir" reset --hard HEAD 2>/dev/null || true
-        git -C "$self_dir" clean -fd 2>/dev/null || true
 
         if git -C "$self_dir" pull --ff-only 2>&1 | logger -t "$LOG_TAG"; then
             new_head=$(git -C "$self_dir" rev-parse HEAD 2>/dev/null || echo "unknown")
@@ -189,7 +188,6 @@ boot_update() {
 
         # Reset any local changes before pulling
         git -C "$dir" reset --hard HEAD 2>/dev/null || true
-        git -C "$dir" clean -fd 2>/dev/null || true
 
         if git -C "$dir" pull --ff-only 2>&1 | logger -t "$LOG_TAG"; then
             new_head=$(git -C "$dir" rev-parse HEAD 2>/dev/null || echo "unknown")
