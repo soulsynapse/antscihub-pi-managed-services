@@ -131,15 +131,6 @@ boot_update() {
     logger -t "$LOG_TAG" "Boot phase: pulling repos..."
     report "boot_update_start" "\"services_dir\":\"${SERVICES_DIR}\""
 
-boot_update() {
-    if [[ "$PULL_ON_BOOT" != "true" ]]; then
-        logger -t "$LOG_TAG" "PULL_ON_BOOT disabled, skipping repo updates"
-        return
-    fi
-
-    logger -t "$LOG_TAG" "Boot phase: pulling repos..."
-    report "boot_update_start" "\"services_dir\":\"${SERVICES_DIR}\""
-
     # First, pull antscihub-pi-service-manager itself
     local self_dir="${SELF_REPO_DIR:-/opt/antscihub-pi-service-manager}"
     if [[ -d "${self_dir}/.git" ]]; then
