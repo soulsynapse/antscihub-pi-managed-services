@@ -213,7 +213,20 @@ boot_update() {
                 fi
             else
                 logger -t "$LOG_TAG" "${folder_name}: up to date (${old_head:0:8})"
-                report "service_update_done" "\"success\":true,\"service\":\"${folder_name}\",\"changed\":false"
+
+                # If service isn't installed yet, run install anyway
+                if [[ -n "$svc" && "$svc" != "none" ]] && ! systemctl list-unit-files "$svc" &>/dev/null; then
+                    logger -t "$LOG_TAG" "${folder_name}: service not installed, running install"
+                    if [[ -n "$install_cmd" && "$install_cmd" != "none" ]]; then
+                        if (cd "$dir" && bash -c "$install_cmd") 2>&1 | logger -t "$LOG_TAG"; then
+                            report "service_install_done" "\"success\":true,\"service\":\"${folder_name}\",\"cmd\":\"${install_cmd}\",\"reason\":\"first_install\""
+                        else
+                            report "service_install_done" "\"success\":false,\"service\":\"${folder_name}\",\"cmd\":\"${install_cmd}\",\"exit_code\":$?"
+                        fi
+                    fi
+                else
+                    report "service_update_done" "\"success\":true,\"service\":\"${folder_name}\",\"changed\":false"
+                fi
             fi
         else
             report "service_update_done" "\"success\":false,\"error\":\"git pull failed\",\"service\":\"${folder_name}\",\"remote\":\"${remote}\""
