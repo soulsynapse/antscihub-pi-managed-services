@@ -27,7 +27,12 @@ if [[ $EUID -ne 0 ]]; then
 fi
 
 REAL_USER="${SUDO_USER:-pi}"
-REAL_HOME=$(eval echo "~${REAL_USER}")
+# FIX #11: resolve home via getent instead of eval
+REAL_HOME=$(getent passwd "$REAL_USER" | cut -d: -f6)
+if [[ -z "$REAL_HOME" ]]; then
+    # Fallback if getent fails
+    REAL_HOME="/home/${REAL_USER}"
+fi
 DESKTOP_DIR="${REAL_HOME}/Desktop"
 MANAGER_REPO_DIR="${DESKTOP_DIR}/2-SERVICE-MANAGER"
 
@@ -111,8 +116,7 @@ install_modules() {
 
         local resolved_target
         resolved_target="$(expand_module_path "$target_path")"
-
-        if [[ "$resolved_target" == '~/'* ]]; then
+                if [[ "$resolved_target" == '~/'* ]]; then
             resolved_target="${REAL_HOME}/${resolved_target:2}"
         fi
 
@@ -199,6 +203,7 @@ mkdir -p "${INSTALL_DIR}/config"
 mkdir -p "${INSTALL_DIR}/services"
 mkdir -p "${MANAGER_REPO_DIR}"
 
+# Copy everything — config values are set by sed below, so a fresh copy is fine
 rsync -a --exclude='.git' --exclude='.gitignore' "${SCRIPT_DIR}/" "${INSTALL_DIR}/"
 
 # Remove old meta files if present
@@ -238,11 +243,30 @@ cat > /etc/NetworkManager/conf.d/99-antscihub-wifi-powersave.conf <<'EOF'
 wifi.powersave = 2
 EOF
 
-cat > /etc/udev/rules.d/70-antscihub-wifi-powersave.rules <<'EOF'
-ACTION=="add", SUBSYSTEM=="net", KERNEL=="wlan*", RUN+="/usr/sbin/iwconfig %k power off"
-EOF
+# FIX #14: Use iw if available, fall back to iwconfig, handle both in udev rule
+if command -v iw &>/dev/null; then
+    IW_CMD="/usr/sbin/iw dev %k set power_save off"
+elif command -v iwconfig &>/dev/null; then
+    IW_CMD="/usr/sbin/iwconfig %k power off"
+else
+    IW_CMD=""
+    warn "Neither iw nor iwconfig found; Wi-Fi power-save udev rule skipped"
+fi
 
-ip link show wlan0 &>/dev/null && iwconfig wlan0 power off 2>/dev/null || true
+if [[ -n "$IW_CMD" ]]; then
+    cat > /etc/udev/rules.d/70-antscihub-wifi-powersave.rules <<EOF
+ACTION=="add", SUBSYSTEM=="net", KERNEL=="wlan*", RUN+="${IW_CMD}"
+EOF
+fi
+
+# Apply immediately to wlan0 if it exists
+if ip link show wlan0 &>/dev/null; then
+    if command -v iw &>/dev/null; then
+        iw dev wlan0 set power_save off 2>/dev/null || true
+    elif command -v iwconfig &>/dev/null; then
+        iwconfig wlan0 power off 2>/dev/null || true
+    fi
+fi
 
 # ─── Install systemd unit ────────────────────────────────────────────────────
 
