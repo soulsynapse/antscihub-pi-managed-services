@@ -1,19 +1,8 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-# =============================================================================
-# antscihub service-manager
-#
-# Scans SERVICES_DIR for folders containing antscihub.manifest.
-# Ensures each declared systemd service is running.
-# On boot, optionally pulls repos and re-runs install commands.
-# Reports everything encrypted over MQTT to fleet/response/{device}.
-# =============================================================================
-
 CONF="/opt/antscihub-pi-service-manager/config/service-manager.conf"
 LOG_TAG="antscihub-service-manager"
-
-# --- Load config --------------------------------------------------------------
 
 if [[ ! -f "$CONF" ]]; then
     logger -t "$LOG_TAG" "FATAL: config not found at ${CONF}"
@@ -27,8 +16,6 @@ CHECK_INTERVAL="${CHECK_INTERVAL:-30}"
 RESTART_THRESHOLD="${RESTART_THRESHOLD:-3}"
 MAX_RESTART_ATTEMPTS="${MAX_RESTART_ATTEMPTS:-5}"
 PULL_ON_BOOT="${PULL_ON_BOOT:-true}"
-
-# --- Locate MQTT Python environment ------------------------------------------
 
 find_mqtt_dir() {
     for candidate in \
@@ -45,7 +32,7 @@ find_mqtt_dir() {
 }
 
 MQTT_DIR=$(find_mqtt_dir) || {
-    logger -t "$LOG_TAG" "FATAL: Cannot find MQTT directory (1-MQTT with mqtt_client.py)"
+    logger -t "$LOG_TAG" "FATAL: Cannot find MQTT directory"
     exit 1
 }
 
@@ -65,6 +52,12 @@ for i in $(seq 1 30); do
 done
 
 # --- Helpers ------------------------------------------------------------------
+
+notify_watchdog() {
+    if [ -n "${WATCHDOG_USEC:-}" ]; then
+        systemd-notify WATCHDOG=1 2>/dev/null || true
+    fi
+}
 
 report() {
     local event="$1"
@@ -114,23 +107,17 @@ discover_services() {
     echo "${found[@]}"
 }
 
-notify_watchdog() {
-    if [ -n "${WATCHDOG_USEC:-}" ]; then
-        systemd-notify WATCHDOG=1 2>/dev/null || true
-    fi
-}
-
-# --- Associative arrays for tracking state ------------------------------------
+# --- State tracking -----------------------------------------------------------
 
 declare -A FAIL_COUNTS
 declare -A RESTART_ATTEMPTS
 declare -A GAVE_UP
 
-# --- Boot phase: pull repos and run install -----------------------------------
+# --- Boot phase ---------------------------------------------------------------
 
 boot_update() {
     if [[ "$PULL_ON_BOOT" != "true" ]]; then
-        logger -t "$LOG_TAG" "PULL_ON_BOOT disabled, skipping repo updates"
+        logger -t "$LOG_TAG" "PULL_ON_BOOT disabled, skipping"
         return
     fi
 
@@ -138,15 +125,15 @@ boot_update() {
     logger -t "$LOG_TAG" "Boot phase: pulling repos..."
     report "boot_update_start" "\"services_dir\":\"${SERVICES_DIR}\""
 
-    # First, pull antscihub-pi-service-manager itself
+    # Self-update
     local self_dir="${SELF_REPO_DIR:-/opt/antscihub-pi-service-manager}"
     if [[ -d "${self_dir}/.git" ]]; then
         local old_head new_head
         old_head=$(git -C "$self_dir" rev-parse HEAD 2>/dev/null || echo "unknown")
 
-        # Reset any local changes before pulling
         git -C "$self_dir" reset --hard HEAD 2>/dev/null || true
 
+        notify_watchdog
         if git -C "$self_dir" pull --ff-only 2>&1 | logger -t "$LOG_TAG"; then
             new_head=$(git -C "$self_dir" rev-parse HEAD 2>/dev/null || echo "unknown")
             if [[ "$old_head" != "$new_head" ]]; then
@@ -164,7 +151,7 @@ boot_update() {
         logger -t "$LOG_TAG" "Self-update repo not found at ${self_dir}; skipping"
     fi
 
-    # Now pull each managed service
+    # Managed services
     local dirs
     dirs=$(discover_services)
 
@@ -180,7 +167,7 @@ boot_update() {
         folder_name=$(basename "$dir")
 
         if [[ -z "$remote" ]]; then
-            logger -t "$LOG_TAG" "No GIT_REMOTE in ${folder_name}, skipping pull"
+            logger -t "$LOG_TAG" "No GIT_REMOTE in ${folder_name}, skipping"
             continue
         fi
 
@@ -192,15 +179,15 @@ boot_update() {
         local old_head new_head
         old_head=$(git -C "$dir" rev-parse HEAD 2>/dev/null || echo "unknown")
 
-        # Reset any local changes before pulling
         git -C "$dir" reset --hard HEAD 2>/dev/null || true
 
+        notify_watchdog
         if git -C "$dir" pull --ff-only 2>&1 | logger -t "$LOG_TAG"; then
             new_head=$(git -C "$dir" rev-parse HEAD 2>/dev/null || echo "unknown")
 
             if [[ "$old_head" != "$new_head" ]]; then
-                report "service_update_start" "{\"service\": \"${folder_name}\"}"
-                report "service_update_done" "{\"success\": true, \"service\": \"${folder_name}\", \"old\": \"${old_head:0:8}\", \"new\": \"${new_head:0:8}\"}"
+                report "service_update_start" "\"service\":\"${folder_name}\""
+                report "service_update_done" "\"success\":true,\"service\":\"${folder_name}\",\"old\":\"${old_head:0:8}\",\"new\":\"${new_head:0:8}\""
 
                 if [[ -n "$install_cmd" && "$install_cmd" != "none" ]]; then
                     logger -t "$LOG_TAG" "Running install for ${folder_name}: ${install_cmd}"
@@ -223,14 +210,13 @@ boot_update() {
                 if [[ -n "$svc" && "$svc" != "none" ]] && ! systemctl list-unit-files "$svc" &>/dev/null; then
                     logger -t "$LOG_TAG" "${folder_name}: service not installed, running install"
                     if [[ -n "$install_cmd" && "$install_cmd" != "none" ]]; then
+                        notify_watchdog
                         if (cd "$dir" && bash -c "$install_cmd") 2>&1 | logger -t "$LOG_TAG"; then
                             report "service_install_done" "\"success\":true,\"service\":\"${folder_name}\",\"cmd\":\"${install_cmd}\",\"reason\":\"first_install\""
                         else
                             report "service_install_done" "\"success\":false,\"service\":\"${folder_name}\",\"cmd\":\"${install_cmd}\",\"exit_code\":$?"
                         fi
                     fi
-                else
-                    report "service_update_done" "\"success\":true,\"service\":\"${folder_name}\",\"changed\":false"
                 fi
             fi
         else
@@ -241,10 +227,9 @@ boot_update() {
     report "boot_update_done" "\"status\":\"complete\""
 }
 
-# --- Main loop: monitor services ----------------------------------------------
+# --- Health check loop --------------------------------------------------------
 
 check_services() {
-    notify_watchdog
     local dirs
     dirs=$(discover_services)
 
@@ -276,7 +261,6 @@ check_services() {
             continue
         fi
 
-        # Service is not active
         local fails=${FAIL_COUNTS["$svc"]:-0}
         fails=$((fails + 1))
         FAIL_COUNTS["$svc"]=$fails
@@ -329,7 +313,6 @@ check_services() {
         fi
     done
 
-    # Build JSON arrays
     local managed_json="[]"
     if [[ ${#managed[@]} -gt 0 ]]; then
         managed_json=$(printf '"%s",' "${managed[@]}")

@@ -4,15 +4,14 @@ After=network-online.target fleet-shell.service
 Wants=network-online.target
 
 [Service]
-Type=simple
+Type=notify
 ExecStart=/opt/antscihub-pi-service-manager/services/service-manager.sh
 Restart=always
 RestartSec=10
-WatchdogSec=120
+WatchdogSec=300
 User=root
 Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
-# Hardening
 ProtectSystem=full
 NoNewPrivileges=false
 TimeoutStopSec=30
