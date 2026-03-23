@@ -5,10 +5,12 @@ Wants=network-online.target
 
 [Service]
 Type=notify
+NotifyAccess=all
 ExecStart=/opt/antscihub-pi-service-manager/services/service-manager.sh
 Restart=always
 RestartSec=10
 WatchdogSec=300
+TimeoutStartSec=120
 User=root
 Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 

@@ -40,6 +40,16 @@ RESPONSE_TOPIC="fleet/response/${DEVICE_ID}"
 
 logger -t "$LOG_TAG" "MQTT_DIR=${MQTT_DIR}"
 
+# --- Systemd notify helpers ---------------------------------------------------
+
+notify_ready() {
+    systemd-notify --ready 2>/dev/null || true
+}
+
+notify_watchdog() {
+    systemd-notify WATCHDOG=1 2>/dev/null || true
+}
+
 # --- Wait for network ---------------------------------------------------------
 
 logger -t "$LOG_TAG" "Waiting for network..."
@@ -51,13 +61,11 @@ for i in $(seq 1 30); do
     sleep 1
 done
 
-# --- Helpers ------------------------------------------------------------------
+# Tell systemd we're ready — must happen before WatchdogSec starts counting
+notify_ready
+logger -t "$LOG_TAG" "Notified systemd: ready"
 
-notify_watchdog() {
-    if [ -n "${WATCHDOG_USEC:-}" ]; then
-        systemd-notify WATCHDOG=1 2>/dev/null || true
-    fi
-}
+# --- Helpers ------------------------------------------------------------------
 
 fix_permissions() {
     local dir="$1"
@@ -194,6 +202,7 @@ boot_update() {
 
                 if [[ -n "$install_cmd" && "$install_cmd" != "none" ]]; then
                     logger -t "$LOG_TAG" "Running install for ${folder_name}: ${install_cmd}"
+                    notify_watchdog
                     local install_exit=0
                     if (cd "$dir" && bash -c "$install_cmd") 2>&1 | logger -t "$LOG_TAG"; then
                         report "service_install_done" "\"success\":true,\"service\":\"${folder_name}\",\"cmd\":\"${install_cmd}\""
