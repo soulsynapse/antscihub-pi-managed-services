@@ -11,7 +11,20 @@ fi
 source "$CONF"
 
 DEVICE_ID="${DEVICE_ID:-$(hostname)}"
-SERVICES_DIR="${SERVICES_DIR:?SERVICES_DIR not set in service-manager.conf}"
+
+# Resolve SERVICES_DIR dynamically if not set in config
+if [[ -z "${SERVICES_DIR:-}" ]]; then
+    REAL_USER=$(getent passwd | awk -F: '$3 >= 1000 && $3 < 60000 {print $1; exit}')
+    REAL_HOME=$(eval echo "~${REAL_USER}")
+    SERVICES_DIR="${REAL_HOME}/Desktop"
+    logger -t "$LOG_TAG" "SERVICES_DIR not set, resolved to ${SERVICES_DIR}"
+fi
+
+# Resolve SELF_REPO_DIR dynamically if not set in config
+if [[ -z "${SELF_REPO_DIR:-}" ]]; then
+    SELF_REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+    logger -t "$LOG_TAG" "SELF_REPO_DIR not set, resolved to ${SELF_REPO_DIR}"
+fi
 CHECK_INTERVAL="${CHECK_INTERVAL:-30}"
 RESTART_THRESHOLD="${RESTART_THRESHOLD:-3}"
 MAX_RESTART_ATTEMPTS="${MAX_RESTART_ATTEMPTS:-5}"
