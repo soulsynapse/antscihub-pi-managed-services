@@ -36,6 +36,11 @@ fi
 DESKTOP_DIR="${REAL_HOME}/Desktop"
 MANAGER_REPO_DIR="${DESKTOP_DIR}/2-SERVICE-MANAGER"
 
+# Run git commands as the real user, not root
+git_as_user() {
+    sudo -u "${REAL_USER}" git "$@"
+}
+
 MQTT_DIR="${DESKTOP_DIR}/1-MQTT"
 VENV_PYTHON="${MQTT_DIR}/venv/bin/python3"
 
@@ -126,14 +131,14 @@ install_modules() {
 
         if [[ -d "${resolved_target}/.git" ]]; then
             log "Updating module: ${repo_url} -> ${resolved_target}"
-            if ! git -C "${resolved_target}" pull --ff-only; then
+            if ! git_as_user -C "${resolved_target}" pull --ff-only; then
                 warn "Failed to update ${resolved_target}; continuing"
             fi
         elif [[ -e "${resolved_target}" ]]; then
             if [[ -d "${resolved_target}" ]] && [[ -z "$(find "${resolved_target}" -mindepth 1 -maxdepth 1 2>/dev/null)" ]]; then
                 log "Cloning module into existing empty dir: ${repo_url} -> ${resolved_target}"
                 rmdir "${resolved_target}" 2>/dev/null || true
-                if ! git clone "${repo_url}" "${resolved_target}"; then
+                if ! git_as_user clone "${repo_url}" "${resolved_target}"; then
                     warn "Failed to clone ${repo_url} into ${resolved_target}; continuing"
                     continue
                 fi
@@ -145,7 +150,7 @@ install_modules() {
             fi
         else
             log "Cloning module: ${repo_url} -> ${resolved_target}"
-            if ! git clone "${repo_url}" "${resolved_target}"; then
+            if ! git_as_user clone "${repo_url}" "${resolved_target}"; then
                 warn "Failed to clone ${repo_url} into ${resolved_target}; continuing"
                 continue
             fi
@@ -298,7 +303,7 @@ if fleet.wait_until_connected(timeout=10):
         'event': 'service_manager_installed',
         'device_id': DEVICE_ID,
         'timestamp': time.time(),
-        'version': '$(git -C "${SCRIPT_DIR}" rev-parse --short HEAD 2>/dev/null || echo unknown)',
+        'version': '$(git_as_user -C "${SCRIPT_DIR}" rev-parse --short HEAD 2>/dev/null || echo unknown)',
         'install_dir': '${INSTALL_DIR}',
     }, encrypt=True)
     time.sleep(1)
