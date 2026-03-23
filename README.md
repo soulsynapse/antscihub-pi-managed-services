@@ -7,8 +7,8 @@ A single meta-service that monitors and maintains other services on a Raspberry 
 From any Pi (via fleet shell or SSH):
 
 ```bash
-sudo git clone https://github.com/soulsynapse/antscihub-pi-service-manager.git ~/Desktop/2-SERVICE-MANAGER/antscihub-pi-service-manager
-sudo bash ~/Desktop/2-SERVICE-MANAGER/antscihub-pi-service-manager/install.sh
+sudo git clone https://github.com/soulsynapse/antscihub-pi-service-manager.git ~/Desktop/2-SERVICE-MANAGER
+sudo bash ~/Desktop/2-SERVICE-MANAGER/install.sh
 ```
 
 During install, module repos listed in `config/modules.conf` are also cloned or updated.
@@ -16,8 +16,8 @@ During install, module repos listed in `config/modules.conf` are also cloned or 
 To update
 
 ```bash
-sudo git -C ~/Desktop/2-SERVICE-MANAGER/antscihub-pi-service-manager pull --ff-only
-sudo bash ~/Desktop/2-SERVICE-MANAGER/antscihub-pi-service-manager/install.sh
+sudo git -C ~/Desktop/2-SERVICE-MANAGER/ pull --ff-only
+sudo bash ~/Desktop/2-SERVICE-MANAGER/install.sh
 ```
 
 
