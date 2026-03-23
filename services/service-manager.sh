@@ -61,7 +61,6 @@ for i in $(seq 1 30); do
     sleep 1
 done
 
-# Tell systemd we're ready — must happen before WatchdogSec starts counting
 notify_ready
 logger -t "$LOG_TAG" "Notified systemd: ready"
 
@@ -70,6 +69,31 @@ logger -t "$LOG_TAG" "Notified systemd: ready"
 fix_permissions() {
     local dir="$1"
     find "$dir" -name "*.sh" -exec chmod +x {} \; 2>/dev/null || true
+}
+
+# Clean local git changes (chmod diffs etc) so pull doesn't fail
+clean_repo() {
+    local dir="$1"
+    git -C "$dir" checkout -- . 2>/dev/null || true
+}
+
+# Pull a git repo with automatic recovery
+pull_repo() {
+    local dir="$1"
+    clean_repo "$dir"
+    if git -C "$dir" pull --ff-only 2>&1 | logger -t "$LOG_TAG"; then
+        fix_permissions "$dir"
+        return 0
+    fi
+    # First attempt failed — try harder
+    logger -t "$LOG_TAG" "Pull failed for ${dir}, resetting and retrying"
+    git -C "$dir" reset --hard HEAD 2>/dev/null || true
+    git -C "$dir" clean -fd 2>/dev/null || true
+    if git -C "$dir" pull --ff-only 2>&1 | logger -t "$LOG_TAG"; then
+        fix_permissions "$dir"
+        return 0
+    fi
+    return 1
 }
 
 report() {
@@ -120,6 +144,29 @@ discover_services() {
     echo "${found[@]}"
 }
 
+run_install() {
+    local dir="$1"
+    local install_cmd="$2"
+    local folder_name="$3"
+    local svc="$4"
+    local reason="${5:-update}"
+
+    fix_permissions "$dir"
+    logger -t "$LOG_TAG" "Running install for ${folder_name}: ${install_cmd}"
+    notify_watchdog
+    if (cd "$dir" && bash -c "$install_cmd") 2>&1 | logger -t "$LOG_TAG"; then
+        report "service_install_done" "\"success\":true,\"service\":\"${folder_name}\",\"cmd\":\"${install_cmd}\",\"reason\":\"${reason}\""
+        if [[ -n "$svc" && "$svc" != "none" ]]; then
+            systemctl restart "$svc" 2>&1 | logger -t "$LOG_TAG" || true
+        fi
+        return 0
+    else
+        local exit_code=$?
+        report "service_install_done" "\"success\":false,\"service\":\"${folder_name}\",\"cmd\":\"${install_cmd}\",\"exit_code\":${exit_code}"
+        return 1
+    fi
+}
+
 # --- State tracking -----------------------------------------------------------
 
 declare -A FAIL_COUNTS
@@ -145,8 +192,7 @@ boot_update() {
         old_head=$(git -C "$self_dir" rev-parse HEAD 2>/dev/null || echo "unknown")
 
         notify_watchdog
-        if git -C "$self_dir" pull --ff-only 2>&1 | logger -t "$LOG_TAG"; then
-            fix_permissions "$self_dir"
+        if pull_repo "$self_dir"; then
             new_head=$(git -C "$self_dir" rev-parse HEAD 2>/dev/null || echo "unknown")
             if [[ "$old_head" != "$new_head" ]]; then
                 report "self_update_done" "\"success\":true,\"old\":\"${old_head:0:8}\",\"new\":\"${new_head:0:8}\",\"source\":\"${self_dir}\""
@@ -192,46 +238,23 @@ boot_update() {
         old_head=$(git -C "$dir" rev-parse HEAD 2>/dev/null || echo "unknown")
 
         notify_watchdog
-        if git -C "$dir" pull --ff-only 2>&1 | logger -t "$LOG_TAG"; then
-            fix_permissions "$dir"
+        if pull_repo "$dir"; then
             new_head=$(git -C "$dir" rev-parse HEAD 2>/dev/null || echo "unknown")
 
             if [[ "$old_head" != "$new_head" ]]; then
-                report "service_update_start" "\"service\":\"${folder_name}\""
                 report "service_update_done" "\"success\":true,\"service\":\"${folder_name}\",\"old\":\"${old_head:0:8}\",\"new\":\"${new_head:0:8}\""
 
                 if [[ -n "$install_cmd" && "$install_cmd" != "none" ]]; then
-                    logger -t "$LOG_TAG" "Running install for ${folder_name}: ${install_cmd}"
-                    notify_watchdog
-                    local install_exit=0
-                    if (cd "$dir" && bash -c "$install_cmd") 2>&1 | logger -t "$LOG_TAG"; then
-                        report "service_install_done" "\"success\":true,\"service\":\"${folder_name}\",\"cmd\":\"${install_cmd}\""
-                    else
-                        install_exit=$?
-                        report "service_install_done" "\"success\":false,\"service\":\"${folder_name}\",\"cmd\":\"${install_cmd}\",\"exit_code\":${install_exit}"
-                    fi
-                fi
-
-                if [[ -n "$svc" && "$svc" != "none" ]]; then
-                    systemctl restart "$svc" 2>&1 | logger -t "$LOG_TAG" || true
+                    run_install "$dir" "$install_cmd" "$folder_name" "$svc" "update"
                 fi
             else
                 logger -t "$LOG_TAG" "${folder_name}: up to date (${old_head:0:8})"
-                fix_permissions "$dir"
 
                 # If service should exist but isn't installed, run install
                 if [[ -n "$svc" && "$svc" != "none" ]] && ! systemctl cat "$svc" &>/dev/null; then
                     logger -t "$LOG_TAG" "${folder_name}: service not installed, running install"
                     if [[ -n "$install_cmd" && "$install_cmd" != "none" ]]; then
-                        notify_watchdog
-                        if (cd "$dir" && bash -c "$install_cmd") 2>&1 | logger -t "$LOG_TAG"; then
-                            report "service_install_done" "\"success\":true,\"service\":\"${folder_name}\",\"cmd\":\"${install_cmd}\",\"reason\":\"first_install\""
-                            if [[ -n "$svc" && "$svc" != "none" ]]; then
-                                systemctl start "$svc" 2>&1 | logger -t "$LOG_TAG" || true
-                            fi
-                        else
-                            report "service_install_done" "\"success\":false,\"service\":\"${folder_name}\",\"cmd\":\"${install_cmd}\",\"exit_code\":$?"
-                        fi
+                        run_install "$dir" "$install_cmd" "$folder_name" "$svc" "first_install"
                     fi
                 fi
             fi
