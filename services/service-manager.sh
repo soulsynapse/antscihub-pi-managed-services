@@ -170,6 +170,68 @@ recording_active_json_bool() {
     fi
 }
 
+system_metrics_json() {
+    # Read from procfs/sysfs with shell builtins only (no extra subprocesses).
+    local load1="null"
+    local load5="null"
+    local load15="null"
+    local mem_available_kb="null"
+    local mem_total_kb="null"
+    local mem_available_pct="null"
+    local cpu_temp_c="null"
+
+    if [[ -r /proc/loadavg ]]; then
+        local l1 l5 l15 rest
+        if read -r l1 l5 l15 rest < /proc/loadavg; then
+            load1="$l1"
+            load5="$l5"
+            load15="$l15"
+        fi
+    fi
+
+    if [[ -r /proc/meminfo ]]; then
+        local key value unit
+        local mem_avail_val=0
+        local mem_total_val=0
+
+        while read -r key value unit; do
+            case "$key" in
+                MemAvailable:) mem_avail_val=$value ;;
+                MemTotal:) mem_total_val=$value ;;
+            esac
+
+            if [[ "$mem_avail_val" -gt 0 && "$mem_total_val" -gt 0 ]]; then
+                break
+            fi
+        done < /proc/meminfo
+
+        if [[ "$mem_avail_val" -gt 0 ]]; then
+            mem_available_kb="$mem_avail_val"
+        fi
+        if [[ "$mem_total_val" -gt 0 ]]; then
+            mem_total_kb="$mem_total_val"
+        fi
+        if [[ "$mem_avail_val" -gt 0 && "$mem_total_val" -gt 0 ]]; then
+            mem_available_pct=$(( (mem_avail_val * 100) / mem_total_val ))
+        fi
+    fi
+
+    if [[ -r /sys/class/thermal/thermal_zone0/temp ]]; then
+        local temp_raw
+        if read -r temp_raw < /sys/class/thermal/thermal_zone0/temp; then
+            if [[ "$temp_raw" =~ ^[0-9]+$ ]]; then
+                if [[ "$temp_raw" -ge 1000 ]]; then
+                    cpu_temp_c="$((temp_raw / 1000)).$(((temp_raw % 1000) / 100))"
+                else
+                    cpu_temp_c="$temp_raw"
+                fi
+            fi
+        fi
+    fi
+
+    echo "\"load_avg_1m\":${load1},\"load_avg_5m\":${load5},\"load_avg_15m\":${load15},\"ram_available_kb\":${mem_available_kb},\"ram_total_kb\":${mem_total_kb},\"ram_available_pct\":${mem_available_pct},\"cpu_core_temp_c\":${cpu_temp_c}"
+}
+
 array_to_json() {
     # FIX #8: accept the array name but guard against empty / missing
     local arr_name="$1"
@@ -506,13 +568,15 @@ check_services() {
     local healthy_json
     local unhealthy_json
     local recording_json
+    local metrics_json
 
     managed_json=$(array_to_json managed)
     healthy_json=$(array_to_json healthy)
     unhealthy_json=$(array_to_json unhealthy)
     recording_json=$(recording_active_json_bool)
+    metrics_json=$(system_metrics_json)
 
-    report_status "\"managed\":${managed_json},\"healthy\":${healthy_json},\"unhealthy\":${unhealthy_json},\"recording\":${recording_json}"
+    report_status "\"managed\":${managed_json},\"healthy\":${healthy_json},\"unhealthy\":${unhealthy_json},\"recording\":${recording_json},${metrics_json}"
 }
 
 # --- Entrypoint ---------------------------------------------------------------
