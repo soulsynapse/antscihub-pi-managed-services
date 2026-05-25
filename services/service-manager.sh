@@ -93,23 +93,70 @@ logger -t "$LOG_TAG" "Notified systemd: ready"
 #         Instead, redirect only stderr to logger via process substitution,
 #         and keep stdin/stdout connected to the coproc FDs.
 
-logger -t "$LOG_TAG" "Starting MQTT helper..."
-coproc MQTT { "$VENV_PYTHON" "$MQTT_HELPER" 2> >(logger -t "$LOG_TAG"); }
-MQTT_FD=${MQTT[1]}
-MQTT_PID=${MQTT_PID}   # bash automatically sets MQTT_PID for the coproc
+MQTT_FD=""
+MQTT_HELPER_PID=""
 
-sleep 3
+mqtt_helper_running() {
+    [[ -n "${MQTT_HELPER_PID:-}" ]] || return 1
+    kill -0 "$MQTT_HELPER_PID" 2>/dev/null || return 1
 
-if ! kill -0 "$MQTT_PID" 2>/dev/null; then
-    logger -t "$LOG_TAG" "FATAL: MQTT helper failed to start"
+    local ppid
+    ppid=$(ps -o ppid= -p "$MQTT_HELPER_PID" 2>/dev/null)
+    ppid="${ppid//[[:space:]]/}"
+    [[ -n "$ppid" && "$ppid" == "$$" ]]
+}
+
+stop_mqtt_helper() {
+    if mqtt_helper_running; then
+        kill "$MQTT_HELPER_PID" 2>/dev/null || true
+    fi
+    if [[ -n "${MQTT_HELPER_PID:-}" ]]; then
+        wait "$MQTT_HELPER_PID" 2>/dev/null || true
+    fi
+    MQTT_HELPER_PID=""
+    MQTT_FD=""
+}
+
+start_mqtt_helper() {
+    logger -t "$LOG_TAG" "Starting MQTT helper..."
+    coproc MQTT { "$VENV_PYTHON" "$MQTT_HELPER" 2> >(logger -t "$LOG_TAG"); }
+
+    MQTT_FD=${MQTT[1]:-}
+    MQTT_HELPER_PID=${MQTT_PID:-}   # bash sets MQTT_PID for the named coproc
+
+    sleep 3
+
+    if [[ -z "${MQTT_FD:-}" || -z "${MQTT_HELPER_PID:-}" ]]; then
+        logger -t "$LOG_TAG" "WARN: MQTT helper started without valid FD/PID"
+        return 1
+    fi
+
+    if ! mqtt_helper_running; then
+        logger -t "$LOG_TAG" "WARN: MQTT helper failed to start"
+        return 1
+    fi
+
+    logger -t "$LOG_TAG" "MQTT helper running (pid ${MQTT_HELPER_PID}, fd ${MQTT_FD})"
+    return 0
+}
+
+ensure_mqtt_helper() {
+    if mqtt_helper_running; then
+        return 0
+    fi
+
+    logger -t "$LOG_TAG" "WARN: MQTT helper not running; attempting respawn"
+    stop_mqtt_helper
+    start_mqtt_helper
+}
+
+if ! start_mqtt_helper; then
+    logger -t "$LOG_TAG" "FATAL: MQTT helper unavailable at startup"
     exit 1
 fi
 
-logger -t "$LOG_TAG" "MQTT helper running (pid ${MQTT_PID})"
-
 cleanup() {
-    kill "$MQTT_PID" 2>/dev/null || true
-    wait "$MQTT_PID" 2>/dev/null || true
+    stop_mqtt_helper
 }
 trap cleanup EXIT
 
@@ -143,7 +190,26 @@ pull_repo() {
 }
 
 mqtt_send() {
-    echo "$1" >&"$MQTT_FD" 2>/dev/null || logger -t "$LOG_TAG" "WARN: mqtt_send failed"
+    local payload="$1"
+
+    if ! ensure_mqtt_helper; then
+        logger -t "$LOG_TAG" "WARN: mqtt_send dropped (helper unavailable)"
+        return 1
+    fi
+
+    if echo "$payload" >&"$MQTT_FD" 2>/dev/null; then
+        return 0
+    fi
+
+    logger -t "$LOG_TAG" "WARN: mqtt_send failed; retrying after helper respawn"
+    stop_mqtt_helper
+    if ensure_mqtt_helper && echo "$payload" >&"$MQTT_FD" 2>/dev/null; then
+        logger -t "$LOG_TAG" "MQTT send recovered after helper respawn"
+        return 0
+    fi
+
+    logger -t "$LOG_TAG" "WARN: mqtt_send failed after respawn"
+    return 1
 }
 
 report() {
@@ -407,7 +473,7 @@ boot_update() {
                 logger -t "$LOG_TAG" "Self-updated, re-running install.sh..."
                 if bash "${self_dir}/install.sh" 2>&1 | logger -t "$LOG_TAG"; then
                     report "self_reinstalled" "\"head\":\"${new_head:0:8}\""
-                    # FIX #7: cleanup trap will fire on exit and properly kill MQTT_PID
+                    # FIX #7: cleanup trap will fire on exit and properly stop MQTT helper
                     sleep 2
                     exit 0
                 else
