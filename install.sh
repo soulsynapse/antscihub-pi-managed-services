@@ -26,7 +26,22 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
-REAL_USER="${SUDO_USER:-pi}"
+# Supports both manual sudo installs and unattended self-reinstall runs.
+# In self-reinstall, SUDO_USER is typically unset, so resolve a real user.
+REAL_USER="${SUDO_USER:-}"
+if [[ -z "${REAL_USER}" ]]; then
+    REAL_USER=$(getent passwd | awk -F: '$3 >= 1000 && $3 < 60000 {print $1; exit}')
+fi
+if [[ -z "${REAL_USER}" ]]; then
+    for d in /home/*/Desktop/1-MQTT /home/*/1-MQTT; do
+        if [[ -d "$d" ]]; then
+            REAL_USER=$(echo "$d" | cut -d/ -f3)
+            break
+        fi
+    done
+fi
+REAL_USER="${REAL_USER:-pi}"
+
 # FIX #11: resolve home via getent instead of eval
 REAL_HOME=$(getent passwd "$REAL_USER" | cut -d: -f6)
 if [[ -z "$REAL_HOME" ]]; then
