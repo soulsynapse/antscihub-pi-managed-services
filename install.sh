@@ -234,7 +234,10 @@ if grep -q '^SELF_REPO_DIR=""' "${INSTALL_DIR}/config/service-manager.conf" 2>/d
     SELF_REPO_DIR_DEFAULT="${INSTALL_DIR}"
     if [[ -d "${SCRIPT_DIR}/.git" ]]; then
         SELF_REPO_DIR_DEFAULT="${SCRIPT_DIR}"
+    elif [[ -d "${MANAGER_REPO_DIR}/.git" ]]; then
+        SELF_REPO_DIR_DEFAULT="${MANAGER_REPO_DIR}"
     fi
+    log "Setting SELF_REPO_DIR=${SELF_REPO_DIR_DEFAULT}"
     sed -i "s|^SELF_REPO_DIR=\"\"|SELF_REPO_DIR=\"${SELF_REPO_DIR_DEFAULT}\"|" "${INSTALL_DIR}/config/service-manager.conf"
 fi
 

@@ -405,11 +405,15 @@ boot_update() {
             if [[ "$old_head" != "$new_head" ]]; then
                 report "self_update_done" "\"success\":true,\"old\":\"${old_head:0:8}\",\"new\":\"${new_head:0:8}\",\"source\":\"${self_dir}\""
                 logger -t "$LOG_TAG" "Self-updated, re-running install.sh..."
-                bash "${self_dir}/install.sh" 2>&1 | logger -t "$LOG_TAG"
-                report "self_reinstalled" "\"head\":\"${new_head:0:8}\""
-                # FIX #7: cleanup trap will fire on exit and properly kill MQTT_PID
-                sleep 2
-                exit 0
+                if bash "${self_dir}/install.sh" 2>&1 | logger -t "$LOG_TAG"; then
+                    report "self_reinstalled" "\"head\":\"${new_head:0:8}\""
+                    # FIX #7: cleanup trap will fire on exit and properly kill MQTT_PID
+                    sleep 2
+                    exit 0
+                else
+                    report "self_reinstall_failed" "\"head\":\"${new_head:0:8}\",\"success\":false"
+                    logger -t "$LOG_TAG" "Self-update install.sh failed; continuing with current process"
+                fi
             fi
         else
             report "self_update_done" "\"success\":false,\"error\":\"git pull failed\",\"dir\":\"${self_dir}\""
