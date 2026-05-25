@@ -35,6 +35,7 @@ CHECK_INTERVAL="${CHECK_INTERVAL:-30}"
 RESTART_THRESHOLD="${RESTART_THRESHOLD:-3}"
 MAX_RESTART_ATTEMPTS="${MAX_RESTART_ATTEMPTS:-5}"
 PULL_ON_BOOT="${PULL_ON_BOOT:-true}"
+RECORDING_STATE_FILE="${SERVICES_DIR}/4-CAPTURE/config/recording-active-state.env"
 
 readonly SERVICE_NONE="none"
 
@@ -159,6 +160,14 @@ report() {
 report_status() {
     local json_payload="$1"
     report "status" "${json_payload}"
+}
+
+recording_active_json_bool() {
+    if [[ -f "$RECORDING_STATE_FILE" ]]; then
+        echo "true"
+    else
+        echo "false"
+    fi
 }
 
 array_to_json() {
@@ -496,12 +505,14 @@ check_services() {
     local managed_json
     local healthy_json
     local unhealthy_json
+    local recording_json
 
     managed_json=$(array_to_json managed)
     healthy_json=$(array_to_json healthy)
     unhealthy_json=$(array_to_json unhealthy)
+    recording_json=$(recording_active_json_bool)
 
-    report_status "\"managed\":${managed_json},\"healthy\":${healthy_json},\"unhealthy\":${unhealthy_json}"
+    report_status "\"managed\":${managed_json},\"healthy\":${healthy_json},\"unhealthy\":${unhealthy_json},\"recording\":${recording_json}"
 }
 
 # --- Entrypoint ---------------------------------------------------------------

@@ -2,7 +2,22 @@
 
 A service manager that monitors, updates, and maintains managed services on a Raspberry Pi fleet. Runs as a systemd service, pulls updates from git on every boot, and reports health status over encrypted MQTT.
 
+## Scope
+
+- Manage, update, and monitor systemd-backed services across a Raspberry Pi fleet.
+- Auto-pull repositories and run service-specific `install.sh` scripts.
+- Perform health checks, restart escalation, and encrypted MQTT reporting to the orchestrator.
+- Declarative service registration via `antscihub.manifest` and `config/modules.conf`.
+
+## Project status
+Stable for implementation. Edits not needed or compartmentalized elsewhere.
+
+
+- **Status:** Active — core features implemented and in use.
+- **Stability:** Stable — install/update and monitoring flows validated on Raspberry Pi devices.
+
 ## Install
+Initial antscihub-pi-setup must be installed. pi-setup SHOULD do the commands below, but if it does not for some reason, the legacy implementation is:
 
 From any Pi (via fleet shell or SSH):
 
