@@ -32,6 +32,8 @@ if [[ -z "${SELF_REPO_DIR:-}" ]]; then
     logger -t "$LOG_TAG" "SELF_REPO_DIR not set, resolved to ${SELF_REPO_DIR}"
 fi
 CHECK_INTERVAL="${CHECK_INTERVAL:-30}"
+# NOTE: CHECK_INTERVAL controls health/status cadence only.
+#       Repo pull/install behavior is handled by boot_update() at service start.
 RESTART_THRESHOLD="${RESTART_THRESHOLD:-3}"
 MAX_RESTART_ATTEMPTS="${MAX_RESTART_ATTEMPTS:-5}"
 PULL_ON_BOOT="${PULL_ON_BOOT:-true}"
@@ -448,6 +450,8 @@ declare -A RESTART_ATTEMPTS
 declare -A GAVE_UP
 
 # --- Boot phase ---------------------------------------------------------------
+# Startup-only update/install pass.
+# This runs when the service starts (boot or manual restart), not every loop.
 
 boot_update() {
     if [[ "$PULL_ON_BOOT" != "true" ]]; then
@@ -471,7 +475,7 @@ boot_update() {
             if [[ "$old_head" != "$new_head" ]]; then
                 report "self_update_done" "\"success\":true,\"old\":\"${old_head:0:8}\",\"new\":\"${new_head:0:8}\",\"source\":\"${self_dir}\""
                 logger -t "$LOG_TAG" "Self-updated, re-running install.sh..."
-                if bash "${self_dir}/install.sh" 2>&1 | logger -t "$LOG_TAG"; then
+                if SELF_REINSTALL=true bash "${self_dir}/install.sh" 2>&1 | logger -t "$LOG_TAG"; then
                     report "self_reinstalled" "\"head\":\"${new_head:0:8}\""
                     # FIX #7: cleanup trap will fire on exit and properly stop MQTT helper
                     sleep 2
@@ -654,10 +658,10 @@ check_services() {
 logger -t "$LOG_TAG" "Starting service-manager (pid $$)"
 report "boot_start" "\"services_dir\":\"${SERVICES_DIR}\",\"check_interval\":${CHECK_INTERVAL}"
 
-# Boot phase
+# Boot phase (one-shot startup pass)
 boot_update
 
-# Monitor loop
+# Monitor loop: steady-state health checks only (no git pull/install pass here)
 while true; do
     notify_watchdog
     check_services

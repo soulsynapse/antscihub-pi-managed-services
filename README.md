@@ -32,10 +32,20 @@ During install, module repos listed in `config/modules.conf` are also cloned or 
 
 ## Update
 
-Updates happen automatically on every boot/restart. The service manager:
+Updates are startup-triggered (one-shot), not continuous polling. On each
+`antscihub-service-manager` start (boot or `systemctl restart`), the service
+manager runs one boot update pass, then enters steady-state monitoring.
+
+During the startup update pass, the service manager:
 
 - Pulls its own repo — if changed, re-runs `install.sh` and restarts itself
 - Pulls each managed service repo — if changed, runs its `install.sh` and restarts the service
+
+Important behavior:
+
+- A new commit pushed to GitHub is applied the next time the service starts
+- The 30-second health loop does **not** perform git pulls
+- To apply a pushed change immediately, restart the service
 
 To force an update manually:
 
@@ -51,8 +61,8 @@ SM=$(find /home/*/Desktop/2-SERVICE-MANAGER -maxdepth 1 -name ".git" -type d 2>/
 
 ## How It Works
 
-- **On boot:** pulls all repos, runs install scripts for new/updated services, reports status over MQTT
-- **Every 30 seconds:** checks if managed services are running, attempts restart if down
+- **At service start (boot/restart):** runs one update/install pass (self repo + managed repos), then continues
+- **Every 30 seconds:** health monitoring only (service checks/restarts + status report), no git pull/update pass
 - **Restart escalation:** 3 consecutive failures triggers restart, gives up after 5 attempts
 - **Reports to:** `fleet/response/{device_id}` (encrypted) using `fleet.service-manager.v1` schema
 
@@ -188,8 +198,8 @@ README.md                 # This file
 | `CHECK_INTERVAL` | 30 | Seconds between health checks |
 | `RESTART_THRESHOLD` | 3 | Consecutive failures before restart attempt |
 | `MAX_RESTART_ATTEMPTS` | 5 | Restart attempts before giving up |
-| `PULL_ON_BOOT` | true | Pull git repos on every boot |
-| `SELF_REPO_DIR` | Set during install | Path to this repo for self-updates |
+| `PULL_ON_BOOT` | true | Run the one-shot startup pull/install pass when the service starts |
+| `SELF_REPO_DIR` | Set during install | Git checkout path used for startup self-updates |
 
 ## Troubleshooting
 
@@ -206,3 +216,4 @@ cd ~/Desktop/2-SERVICE-MANAGER && sudo git checkout -- . && sudo git pull --ff-o
 # Restart to trigger boot update
 sudo systemctl restart antscihub-service-manager
 ```
+

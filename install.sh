@@ -213,8 +213,14 @@ systemctl stop antscihub-meta 2>/dev/null || true
 systemctl disable antscihub-meta 2>/dev/null || true
 rm -f /etc/systemd/system/antscihub-meta.service
 
-# Stop service-manager if already running
-systemctl stop antscihub-service-manager 2>/dev/null || true
+# Stop service-manager if already running.
+# During self-reinstall (triggered from within service-manager itself),
+# skipping this avoids killing the in-progress updater process.
+if [[ "${SELF_REINSTALL:-false}" == "true" ]]; then
+    log "SELF_REINSTALL=true: skipping explicit stop of antscihub-service-manager"
+else
+    systemctl stop antscihub-service-manager 2>/dev/null || true
+fi
 
 # ─── Copy files ───────────────────────────────────────────────────────────────
 
