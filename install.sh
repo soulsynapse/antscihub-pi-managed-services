@@ -151,7 +151,7 @@ reclone_repo() {
         return 1
     fi
 
-    local parent base abs_dir tmp_dir backup_dir
+    local parent base abs_dir tmp_dir
     parent=$(cd "$(dirname "$dir")" 2>/dev/null && pwd) || return 1
     base=$(basename "$dir")
     abs_dir="${parent}/${base}"
@@ -175,21 +175,22 @@ reclone_repo() {
         return 1
     fi
 
-    backup_dir="${abs_dir}.broken-$(date +%Y%m%d-%H%M%S)"
-    if ! mv "$abs_dir" "$backup_dir"; then
-        warn "${dir}: failed to preserve broken checkout at ${backup_dir}"
-        rm -rf "$tmp_dir" 2>/dev/null || true
-        return 1
+    if [[ -e "$abs_dir" ]]; then
+        warn "${dir}: removing broken checkout before reclone"
+        if ! rm -rf "$abs_dir"; then
+            warn "${dir}: failed to remove broken checkout"
+            rm -rf "$tmp_dir" 2>/dev/null || true
+            return 1
+        fi
     fi
     if ! mv "$tmp_dir" "$abs_dir"; then
-        warn "${dir}: failed to install repaired checkout; restoring broken checkout"
-        mv "$backup_dir" "$abs_dir" 2>/dev/null || true
+        warn "${dir}: failed to install repaired checkout"
         rm -rf "$tmp_dir" 2>/dev/null || true
         return 1
     fi
 
     chown -R "${REAL_USER}:${REAL_GROUP}" "$abs_dir" 2>/dev/null || true
-    warn "${dir}: preserved broken checkout at ${backup_dir}"
+    warn "${dir}: replaced broken checkout with clean clone"
     REPO_REPAIRED_BY_RECLONE=true
     return 0
 }

@@ -267,7 +267,7 @@ reclone_repo() {
         return 1
     fi
 
-    local parent base abs_dir tmp_dir backup_dir owner group
+    local parent base abs_dir tmp_dir owner group
     parent=$(cd "$(dirname "$dir")" 2>/dev/null && pwd) || return 1
     base=$(basename "$dir")
     abs_dir="${parent}/${base}"
@@ -298,15 +298,16 @@ reclone_repo() {
         return 1
     fi
 
-    backup_dir="${abs_dir}.broken-$(date +%Y%m%d-%H%M%S)"
-    if ! mv "$abs_dir" "$backup_dir"; then
-        logger -t "$LOG_TAG" "${dir}: failed to preserve broken checkout at ${backup_dir}"
-        rm -rf "$tmp_dir" 2>/dev/null || true
-        return 1
+    if [[ -e "$abs_dir" ]]; then
+        logger -t "$LOG_TAG" "${dir}: removing broken checkout before reclone"
+        if ! rm -rf "$abs_dir"; then
+            logger -t "$LOG_TAG" "${dir}: failed to remove broken checkout"
+            rm -rf "$tmp_dir" 2>/dev/null || true
+            return 1
+        fi
     fi
     if ! mv "$tmp_dir" "$abs_dir"; then
-        logger -t "$LOG_TAG" "${dir}: failed to install repaired checkout; restoring broken checkout"
-        mv "$backup_dir" "$abs_dir" 2>/dev/null || true
+        logger -t "$LOG_TAG" "${dir}: failed to install repaired checkout"
         rm -rf "$tmp_dir" 2>/dev/null || true
         return 1
     fi
@@ -314,7 +315,7 @@ reclone_repo() {
     if [[ -n "$owner" && "$owner" != "UNKNOWN" ]]; then
         chown -R "${owner}:${group}" "$abs_dir" 2>/dev/null || true
     fi
-    logger -t "$LOG_TAG" "${dir}: preserved broken checkout at ${backup_dir}"
+    logger -t "$LOG_TAG" "${dir}: replaced broken checkout with clean clone"
     return 0
 }
 
@@ -495,8 +496,14 @@ parse_manifest() {
 
 # FIX #3: discover_services now uses null-delimited output so paths with
 #         spaces are handled correctly.
+cleanup_generated_broken_repos() {
+    find "${SERVICES_DIR}" -type d -name "*.broken-*" -prune -exec rm -rf {} + 2>/dev/null || true
+}
+
 discover_services() {
-    find "${SERVICES_DIR}" -name "antscihub.manifest" -type f -print0 2>/dev/null \
+    find "${SERVICES_DIR}" \
+        \( -type d \( -name "*.broken-*" -o -name ".*.reclone.*" \) -prune \) -o \
+        \( -name "antscihub.manifest" -type f -print0 \) 2>/dev/null \
         | while IFS= read -r -d '' manifest; do
             printf '%s\0' "$(dirname "$manifest")/"
         done
@@ -673,6 +680,7 @@ boot_update() {
         logger -t "$LOG_TAG" "Self-update repo not found at ${self_dir}; skipping"
     fi
 
+    cleanup_generated_broken_repos
     # Clone any new modules from modules.conf
     clone_missing_modules
 
