@@ -497,7 +497,9 @@ parse_manifest() {
 # FIX #3: discover_services now uses null-delimited output so paths with
 #         spaces are handled correctly.
 cleanup_generated_broken_repos() {
-    find "${SERVICES_DIR}" -type d -name "*.broken-*" -prune -exec rm -rf {} + 2>/dev/null || true
+    find "${SERVICES_DIR}" \
+        \( -type d \( -name "*.broken-*" -o -name ".*.reclone.*" \) -prune \) \
+        -exec rm -rf {} + 2>/dev/null || true
 }
 
 discover_services() {
@@ -507,6 +509,28 @@ discover_services() {
         | while IFS= read -r -d '' manifest; do
             printf '%s\0' "$(dirname "$manifest")/"
         done
+}
+
+service_unit_needs_reinstall() {
+    local svc="$1"
+    local folder_name="$2"
+
+    [[ -n "$svc" && "$svc" != "$SERVICE_NONE" ]] || return 1
+
+    if ! systemctl cat "$svc" &>/dev/null; then
+        logger -t "$LOG_TAG" "${folder_name}: service not installed, running install"
+        return 0
+    fi
+
+    local unit_text
+    unit_text=$(systemctl cat "$svc" --no-pager 2>/dev/null || true)
+    if printf '%s\n' "$unit_text" | grep -Eq '\.broken-[0-9]{8}-[0-9]{6}|\.reclone\.'; then
+        logger -t "$LOG_TAG" "${folder_name}: ${svc} unit references generated duplicate path, reinstalling"
+        report "service_unit_repair" "\"service\":\"${svc}\",\"folder\":\"${folder_name}\",\"reason\":\"unit references generated duplicate path\""
+        return 0
+    fi
+
+    return 1
 }
 
 # FIX #5: capture the real exit code of the install command via PIPESTATUS
@@ -748,10 +772,9 @@ boot_update() {
             else
                 logger -t "$LOG_TAG" "${folder_name}: up to date (${old_head:0:8})"
 
-                if [[ -n "$svc" && "$svc" != "$SERVICE_NONE" ]] && ! systemctl cat "$svc" &>/dev/null; then
-                    logger -t "$LOG_TAG" "${folder_name}: service not installed, running install"
+                if service_unit_needs_reinstall "$svc" "$folder_name"; then
                     if [[ -n "$install_cmd" && "$install_cmd" != "$SERVICE_NONE" ]]; then
-                        run_install "$dir" "$install_cmd" "$folder_name" "$svc" "first_install"
+                        run_install "$dir" "$install_cmd" "$folder_name" "$svc" "repair_unit"
                     fi
                 fi
             fi
