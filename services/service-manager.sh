@@ -38,6 +38,7 @@ RESTART_THRESHOLD="${RESTART_THRESHOLD:-3}"
 MAX_RESTART_ATTEMPTS="${MAX_RESTART_ATTEMPTS:-5}"
 PULL_ON_BOOT="${PULL_ON_BOOT:-true}"
 RECORDING_STATE_FILE="${SERVICES_DIR}/4-CAPTURE/config/recording-active-state.env"
+RUNNING_INSTALL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 readonly SERVICE_NONE="none"
 
@@ -174,14 +175,179 @@ clean_repo() {
     git -C "$dir" checkout -- . 2>/dev/null || true
 }
 
+repo_branch() {
+    local dir="${1%/}"
+    local fallback="${2:-main}"
+    local branch
+
+    branch=$(git -C "$dir" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+    if [[ -z "$branch" || "$branch" == "HEAD" ]]; then
+        branch="$fallback"
+    fi
+    echo "$branch"
+}
+
+repo_remote() {
+    local dir="${1%/}"
+    git -C "$dir" remote get-url origin 2>/dev/null || true
+}
+
+git_common_dir() {
+    local dir="${1%/}"
+    local git_dir
+
+    git_dir=$(git -C "$dir" rev-parse --git-common-dir 2>/dev/null || true)
+    if [[ -z "$git_dir" ]]; then
+        git_dir="${dir}/.git"
+    elif [[ "$git_dir" != /* ]]; then
+        git_dir="${dir}/${git_dir}"
+    fi
+    echo "$git_dir"
+}
+
+remove_transient_git_refs() {
+    local dir="${1%/}"
+    local git_dir
+    git_dir=$(git_common_dir "$dir")
+
+    [[ -d "$git_dir" ]] || return 0
+
+    # These pseudo-refs are safe to recreate and are common casualties after
+    # interrupted pulls. A broken ORIG_HEAD can block otherwise healthy fetches.
+    local ref_file
+    for ref_file in ORIG_HEAD FETCH_HEAD MERGE_HEAD REBASE_HEAD CHERRY_PICK_HEAD; do
+        if [[ -e "${git_dir}/${ref_file}" ]]; then
+            logger -t "$LOG_TAG" "${dir}: removing transient git ref ${ref_file}"
+            rm -f "${git_dir}/${ref_file}" 2>/dev/null || true
+        fi
+    done
+
+    find "$git_dir" -type f -name "*.lock" -mmin +10 -print -delete 2>/dev/null \
+        | while IFS= read -r lock_file; do
+            logger -t "$LOG_TAG" "${dir}: removed stale git lock ${lock_file}"
+        done
+}
+
+fetch_reset_repo() {
+    local dir="${1%/}"
+    local remote="$2"
+    local branch="$3"
+
+    [[ -n "$branch" ]] || branch="main"
+
+    if [[ -n "$remote" ]]; then
+        if git -C "$dir" remote get-url origin >/dev/null 2>&1; then
+            git -C "$dir" remote set-url origin "$remote" 2>/dev/null || true
+        else
+            git -C "$dir" remote add origin "$remote" 2>/dev/null || true
+        fi
+    fi
+
+    remove_transient_git_refs "$dir"
+
+    if ! git -C "$dir" fetch --prune origin "+refs/heads/${branch}:refs/remotes/origin/${branch}" 2>&1 | logger -t "$LOG_TAG"; then
+        return 1
+    fi
+    if ! git -C "$dir" reset --hard "origin/${branch}" 2>&1 | logger -t "$LOG_TAG"; then
+        return 1
+    fi
+    git -C "$dir" clean -fd 2>&1 | logger -t "$LOG_TAG" || true
+    return 0
+}
+
+reclone_repo() {
+    local dir="${1%/}"
+    local remote="$2"
+    local branch="$3"
+    local reason="${4:-git repair failed}"
+
+    [[ -n "$remote" ]] || remote=$(repo_remote "$dir")
+    if [[ -z "$remote" ]]; then
+        logger -t "$LOG_TAG" "${dir}: cannot reclone; no origin remote available"
+        return 1
+    fi
+
+    local parent base abs_dir tmp_dir backup_dir owner group
+    parent=$(cd "$(dirname "$dir")" 2>/dev/null && pwd) || return 1
+    base=$(basename "$dir")
+    abs_dir="${parent}/${base}"
+
+    if [[ "$abs_dir" == "$RUNNING_INSTALL_DIR" ]]; then
+        logger -t "$LOG_TAG" "${dir}: refusing to reclone running install directory"
+        return 1
+    fi
+
+    owner=$(stat -c '%U' "$abs_dir" 2>/dev/null || echo root)
+    group=$(stat -c '%G' "$abs_dir" 2>/dev/null || echo root)
+    tmp_dir=$(mktemp -d "${parent}/.${base}.reclone.XXXXXX") || return 1
+    rmdir "$tmp_dir" 2>/dev/null || true
+
+    logger -t "$LOG_TAG" "${dir}: recloning from ${remote} (${reason})"
+    if [[ -n "$branch" ]]; then
+        if ! git clone --branch "$branch" "$remote" "$tmp_dir" 2>&1 | logger -t "$LOG_TAG"; then
+            rm -rf "$tmp_dir" 2>/dev/null || true
+            tmp_dir=$(mktemp -d "${parent}/.${base}.reclone.XXXXXX") || return 1
+            rmdir "$tmp_dir" 2>/dev/null || true
+            if ! git clone "$remote" "$tmp_dir" 2>&1 | logger -t "$LOG_TAG"; then
+                rm -rf "$tmp_dir" 2>/dev/null || true
+                return 1
+            fi
+        fi
+    elif ! git clone "$remote" "$tmp_dir" 2>&1 | logger -t "$LOG_TAG"; then
+        rm -rf "$tmp_dir" 2>/dev/null || true
+        return 1
+    fi
+
+    backup_dir="${abs_dir}.broken-$(date +%Y%m%d-%H%M%S)"
+    if ! mv "$abs_dir" "$backup_dir"; then
+        logger -t "$LOG_TAG" "${dir}: failed to preserve broken checkout at ${backup_dir}"
+        rm -rf "$tmp_dir" 2>/dev/null || true
+        return 1
+    fi
+    if ! mv "$tmp_dir" "$abs_dir"; then
+        logger -t "$LOG_TAG" "${dir}: failed to install repaired checkout; restoring broken checkout"
+        mv "$backup_dir" "$abs_dir" 2>/dev/null || true
+        rm -rf "$tmp_dir" 2>/dev/null || true
+        return 1
+    fi
+
+    if [[ -n "$owner" && "$owner" != "UNKNOWN" ]]; then
+        chown -R "${owner}:${group}" "$abs_dir" 2>/dev/null || true
+    fi
+    logger -t "$LOG_TAG" "${dir}: preserved broken checkout at ${backup_dir}"
+    return 0
+}
+
 pull_repo() {
-    local dir="$1"
+    local dir="${1%/}"
+    local remote="${2:-}"
+    local branch="${3:-}"
+
+    [[ -d "${dir}/.git" ]] || return 1
+
+    [[ -n "$remote" ]] || remote=$(repo_remote "$dir")
+    [[ -n "$branch" ]] || branch=$(repo_branch "$dir" "main")
+
     clean_repo "$dir"
     if git -C "$dir" pull --ff-only 2>&1 | logger -t "$LOG_TAG"; then
         fix_permissions "$dir"
         return 0
     fi
-    logger -t "$LOG_TAG" "Pull failed for ${dir}, resetting and retrying"
+
+    logger -t "$LOG_TAG" "Pull failed for ${dir}, trying fetch/reset repair"
+    if fetch_reset_repo "$dir" "$remote" "$branch"; then
+        fix_permissions "$dir"
+        return 0
+    fi
+
+    logger -t "$LOG_TAG" "Fetch/reset repair failed for ${dir}, trying reclone"
+    if reclone_repo "$dir" "$remote" "$branch" "pull failed and refs could not be repaired"; then
+        fix_permissions "$dir"
+        return 0
+    fi
+
+    logger -t "$LOG_TAG" "Reclone failed for ${dir}, trying final reset/pull"
+    remove_transient_git_refs "$dir"
     git -C "$dir" reset --hard HEAD 2>/dev/null || true
     git -C "$dir" clean -fd 2>/dev/null || true
     if git -C "$dir" pull --ff-only 2>&1 | logger -t "$LOG_TAG"; then
@@ -401,8 +567,23 @@ clone_missing_modules() {
                 ;;
         esac
 
-        # Already cloned?
+        local branch="main"
+        if [[ -f "${target_path}/antscihub.manifest" ]]; then
+            unset existing_manifest
+            local -A existing_manifest
+            parse_manifest "${target_path}/antscihub.manifest" existing_manifest
+            branch="${existing_manifest[GIT_BRANCH]:-main}"
+        fi
+
+        # Existing modules are still updated here so a deleted or corrupt
+        # manifest can be restored before discovery scans SERVICES_DIR.
         if [[ -d "${target_path}/.git" ]]; then
+            logger -t "$LOG_TAG" "Module exists, updating/repairing ${target_path}"
+            if pull_repo "$target_path" "$repo_url" "$branch"; then
+                report "module_update_done" "\"success\":true,\"repo\":\"${repo_url}\",\"path\":\"${target_path}\""
+            else
+                report "module_update_done" "\"success\":false,\"repo\":\"${repo_url}\",\"path\":\"${target_path}\""
+            fi
             continue
         fi
 
@@ -470,7 +651,7 @@ boot_update() {
         old_head=$(git -C "$self_dir" rev-parse HEAD 2>/dev/null || echo "unknown")
 
         notify_watchdog
-        if pull_repo "$self_dir"; then
+        if pull_repo "$self_dir" "$(repo_remote "$self_dir")" "$(repo_branch "$self_dir" "main")"; then
             new_head=$(git -C "$self_dir" rev-parse HEAD 2>/dev/null || echo "unknown")
             if [[ "$old_head" != "$new_head" ]]; then
                 report "self_update_done" "\"success\":true,\"old\":\"${old_head:0:8}\",\"new\":\"${new_head:0:8}\",\"source\":\"${self_dir}\""
@@ -511,20 +692,43 @@ boot_update() {
         local folder_name
         folder_name=$(basename "$dir")
 
+        local branch="${manifest[GIT_BRANCH]:-}"
         if [[ -z "$remote" ]]; then
-            logger -t "$LOG_TAG" "No GIT_REMOTE in ${folder_name}, skipping"
-            continue
+            remote=$(repo_remote "$dir")
+            if [[ -n "$remote" ]]; then
+                logger -t "$LOG_TAG" "${folder_name}: manifest missing GIT_REMOTE, using origin ${remote} for repair"
+                report "service_manifest_invalid" "\"service\":\"${folder_name}\",\"error\":\"missing GIT_REMOTE\",\"repair\":\"using_origin\""
+            else
+                logger -t "$LOG_TAG" "No GIT_REMOTE or origin remote in ${folder_name}, skipping"
+                report "service_manifest_invalid" "\"service\":\"${folder_name}\",\"error\":\"missing GIT_REMOTE and origin\""
+                continue
+            fi
         fi
 
         if [[ ! -d "${dir}/.git" ]]; then
             logger -t "$LOG_TAG" "${folder_name} not a git repo, skipping"
             continue
         fi
-            local old_head new_head
+        [[ -n "$branch" ]] || branch=$(repo_branch "$dir" "main")
+
+        local old_head new_head
         old_head=$(git -C "$dir" rev-parse HEAD 2>/dev/null || echo "unknown")
 
         notify_watchdog
-        if pull_repo "$dir"; then
+        if pull_repo "$dir" "$remote" "$branch"; then
+            unset manifest
+            local -A manifest
+            parse_manifest "${dir}/antscihub.manifest" manifest
+            svc="${manifest[SERVICE_NAME]:-}"
+            remote="${manifest[GIT_REMOTE]:-$remote}"
+            install_cmd="${manifest[INSTALL_CMD]:-}"
+
+            if [[ -z "$svc" ]]; then
+                logger -t "$LOG_TAG" "${folder_name}: manifest missing SERVICE_NAME after repair, skipping health install checks"
+                report "service_manifest_invalid" "\"service\":\"${folder_name}\",\"error\":\"missing SERVICE_NAME after repair\""
+                continue
+            fi
+
             new_head=$(git -C "$dir" rev-parse HEAD 2>/dev/null || echo "unknown")
 
             if [[ "$old_head" != "$new_head" ]]; then

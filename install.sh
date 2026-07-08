@@ -41,6 +41,7 @@ if [[ -z "${REAL_USER}" ]]; then
     done
 fi
 REAL_USER="${REAL_USER:-pi}"
+REAL_GROUP=$(id -gn "${REAL_USER}" 2>/dev/null || echo "${REAL_USER}")
 
 # FIX #11: resolve home via getent instead of eval
 REAL_HOME=$(getent passwd "$REAL_USER" | cut -d: -f6)
@@ -54,6 +55,165 @@ MANAGER_REPO_DIR="${DESKTOP_DIR}/2-SERVICE-MANAGER"
 # Run git commands as the real user, not root
 git_as_user() {
     sudo -u "${REAL_USER}" git "$@"
+}
+
+ensure_user_dir() {
+    local dir="$1"
+    mkdir -p "$dir"
+    if id -u "${REAL_USER}" >/dev/null 2>&1; then
+        chown "${REAL_USER}:${REAL_GROUP}" "$dir" 2>/dev/null || true
+    fi
+}
+
+git_repo_branch() {
+    local dir="${1%/}"
+    local fallback="${2:-main}"
+    local branch
+
+    branch=$(git_as_user -C "$dir" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+    if [[ -z "$branch" || "$branch" == "HEAD" ]]; then
+        branch="$fallback"
+    fi
+    echo "$branch"
+}
+
+git_common_dir_for_repo() {
+    local dir="${1%/}"
+    local git_dir
+
+    git_dir=$(git_as_user -C "$dir" rev-parse --git-common-dir 2>/dev/null || true)
+    if [[ -z "$git_dir" ]]; then
+        git_dir="${dir}/.git"
+    elif [[ "$git_dir" != /* ]]; then
+        git_dir="${dir}/${git_dir}"
+    fi
+    echo "$git_dir"
+}
+
+remove_transient_git_refs() {
+    local dir="${1%/}"
+    local git_dir
+    git_dir=$(git_common_dir_for_repo "$dir")
+
+    [[ -d "$git_dir" ]] || return 0
+
+    local ref_file
+    for ref_file in ORIG_HEAD FETCH_HEAD MERGE_HEAD REBASE_HEAD CHERRY_PICK_HEAD; do
+        if [[ -e "${git_dir}/${ref_file}" ]]; then
+            warn "${dir}: removing transient git ref ${ref_file}"
+            rm -f "${git_dir}/${ref_file}" 2>/dev/null || true
+        fi
+    done
+
+    find "$git_dir" -type f -name "*.lock" -mmin +10 -print -delete 2>/dev/null \
+        | while IFS= read -r lock_file; do
+            warn "${dir}: removed stale git lock ${lock_file}"
+        done
+}
+
+fetch_reset_repo() {
+    local dir="${1%/}"
+    local remote="$2"
+    local branch="$3"
+
+    [[ -n "$branch" ]] || branch="main"
+
+    if [[ -n "$remote" ]]; then
+        if git_as_user -C "$dir" remote get-url origin >/dev/null 2>&1; then
+            git_as_user -C "$dir" remote set-url origin "$remote" 2>/dev/null || true
+        else
+            git_as_user -C "$dir" remote add origin "$remote" 2>/dev/null || true
+        fi
+    fi
+
+    remove_transient_git_refs "$dir"
+
+    if ! git_as_user -C "$dir" fetch --prune origin "+refs/heads/${branch}:refs/remotes/origin/${branch}"; then
+        return 1
+    fi
+    if ! git_as_user -C "$dir" reset --hard "origin/${branch}"; then
+        return 1
+    fi
+    git_as_user -C "$dir" clean -fd || true
+    return 0
+}
+
+REPO_REPAIRED_BY_RECLONE=false
+
+reclone_repo() {
+    local dir="${1%/}"
+    local remote="$2"
+    local branch="$3"
+    local reason="${4:-git repair failed}"
+
+    if [[ -z "$remote" ]]; then
+        warn "${dir}: cannot reclone; no remote URL available"
+        return 1
+    fi
+
+    local parent base abs_dir tmp_dir backup_dir
+    parent=$(cd "$(dirname "$dir")" 2>/dev/null && pwd) || return 1
+    base=$(basename "$dir")
+    abs_dir="${parent}/${base}"
+
+    tmp_dir=$(sudo -u "$REAL_USER" mktemp -d "${parent}/.${base}.reclone.XXXXXX") || return 1
+    rmdir "$tmp_dir" 2>/dev/null || true
+
+    warn "${dir}: recloning from ${remote} (${reason})"
+    if [[ -n "$branch" ]]; then
+        if ! git_as_user clone --branch "$branch" "$remote" "$tmp_dir"; then
+            rm -rf "$tmp_dir" 2>/dev/null || true
+            tmp_dir=$(sudo -u "$REAL_USER" mktemp -d "${parent}/.${base}.reclone.XXXXXX") || return 1
+            rmdir "$tmp_dir" 2>/dev/null || true
+            if ! git_as_user clone "$remote" "$tmp_dir"; then
+                rm -rf "$tmp_dir" 2>/dev/null || true
+                return 1
+            fi
+        fi
+    elif ! git_as_user clone "$remote" "$tmp_dir"; then
+        rm -rf "$tmp_dir" 2>/dev/null || true
+        return 1
+    fi
+
+    backup_dir="${abs_dir}.broken-$(date +%Y%m%d-%H%M%S)"
+    if ! mv "$abs_dir" "$backup_dir"; then
+        warn "${dir}: failed to preserve broken checkout at ${backup_dir}"
+        rm -rf "$tmp_dir" 2>/dev/null || true
+        return 1
+    fi
+    if ! mv "$tmp_dir" "$abs_dir"; then
+        warn "${dir}: failed to install repaired checkout; restoring broken checkout"
+        mv "$backup_dir" "$abs_dir" 2>/dev/null || true
+        rm -rf "$tmp_dir" 2>/dev/null || true
+        return 1
+    fi
+
+    chown -R "${REAL_USER}:${REAL_GROUP}" "$abs_dir" 2>/dev/null || true
+    warn "${dir}: preserved broken checkout at ${backup_dir}"
+    REPO_REPAIRED_BY_RECLONE=true
+    return 0
+}
+
+update_repo() {
+    local dir="${1%/}"
+    local remote="$2"
+    local branch="${3:-}"
+
+    REPO_REPAIRED_BY_RECLONE=false
+    [[ -n "$branch" ]] || branch=$(git_repo_branch "$dir" "main")
+
+    git_as_user -C "$dir" checkout -- . 2>/dev/null || true
+    if git_as_user -C "$dir" pull --ff-only; then
+        return 0
+    fi
+
+    warn "Pull failed for ${dir}; trying fetch/reset repair"
+    if fetch_reset_repo "$dir" "$remote" "$branch"; then
+        return 0
+    fi
+
+    warn "Fetch/reset repair failed for ${dir}; trying reclone"
+    reclone_repo "$dir" "$remote" "$branch" "pull failed and refs could not be repaired"
 }
 
 MQTT_DIR="${DESKTOP_DIR}/1-MQTT"
@@ -142,12 +302,22 @@ install_modules() {
 
         log "Module target resolved: ${target_path} -> ${resolved_target}"
 
-        mkdir -p "$(dirname "${resolved_target}")"
+        local resolved_parent
+        resolved_parent="$(dirname "${resolved_target}")"
+        ensure_user_dir "$resolved_parent"
 
         if [[ -d "${resolved_target}/.git" ]]; then
             log "Updating module: ${repo_url} -> ${resolved_target}"
-            if ! git_as_user -C "${resolved_target}" pull --ff-only; then
-                warn "Failed to update ${resolved_target}; continuing"
+            local branch="main"
+            if [[ -f "${resolved_target}/antscihub.manifest" ]]; then
+                while IFS="=" read -r mkey mval; do
+                    [[ "$mkey" == "GIT_BRANCH" ]] && branch="$(echo "$mval" | xargs)"
+                done < "${resolved_target}/antscihub.manifest"
+            fi
+            if ! update_repo "${resolved_target}" "${repo_url}" "$branch"; then
+                warn "Failed to update or repair ${resolved_target}; continuing"
+            elif [[ "$REPO_REPAIRED_BY_RECLONE" == "true" ]]; then
+                run_module_install "${resolved_target}"
             fi
         elif [[ -e "${resolved_target}" ]]; then
             if [[ -d "${resolved_target}" ]] && [[ -z "$(find "${resolved_target}" -mindepth 1 -maxdepth 1 2>/dev/null)" ]]; then
@@ -173,7 +343,7 @@ install_modules() {
         fi
 
         if id -u "${REAL_USER}" >/dev/null 2>&1; then
-            chown -R "${REAL_USER}:${REAL_USER}" "${resolved_target}" 2>/dev/null || true
+            chown -R "${REAL_USER}:${REAL_GROUP}" "${resolved_target}" 2>/dev/null || true
         fi
     done < "${MODULES_FILE}"
 }
