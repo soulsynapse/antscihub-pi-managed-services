@@ -598,6 +598,9 @@ clone_missing_modules() {
                 ;;
         esac
 
+        local module_name
+        module_name=$(basename "${target_path%/}")
+
         local branch="main"
         if [[ -f "${target_path}/antscihub.manifest" ]]; then
             unset existing_manifest
@@ -609,22 +612,46 @@ clone_missing_modules() {
         # Existing modules are still updated here so a deleted or corrupt
         # manifest can be restored before discovery scans SERVICES_DIR.
         if [[ -d "${target_path}/.git" ]]; then
-            logger -t "$LOG_TAG" "Module exists, updating/repairing ${target_path}"
+            logger -t "$LOG_TAG" "Module exists, updating/repairing ${module_name} at ${target_path}"
+            local old_head new_head
+            old_head=$(git -C "$target_path" rev-parse HEAD 2>/dev/null || echo "unknown")
             if pull_repo "$target_path" "$repo_url" "$branch"; then
-                report "module_update_done" "\"success\":true,\"repo\":\"${repo_url}\",\"path\":\"${target_path}\""
+                new_head=$(git -C "$target_path" rev-parse HEAD 2>/dev/null || echo "unknown")
+                if [[ "$old_head" != "$new_head" ]]; then
+                    report "module_update_done" "\"success\":true,\"changed\":true,\"module\":\"${module_name}\",\"repo\":\"${repo_url}\",\"path\":\"${target_path}\",\"old\":\"${old_head:0:8}\",\"new\":\"${new_head:0:8}\""
+
+                    if [[ -f "${target_path}/antscihub.manifest" ]]; then
+                        unset updated_manifest
+                        local -A updated_manifest
+                        parse_manifest "${target_path}/antscihub.manifest" updated_manifest
+
+                        local install_cmd="${updated_manifest[INSTALL_CMD]:-}"
+                        local svc="${updated_manifest[SERVICE_NAME]:-}"
+
+                        if [[ -n "$install_cmd" && "$install_cmd" != "$SERVICE_NONE" ]]; then
+                            run_install "$target_path" "$install_cmd" "$module_name" "$svc" "module_update"
+                        else
+                            logger -t "$LOG_TAG" "${module_name}: updated but no module install command configured"
+                        fi
+                    else
+                        logger -t "$LOG_TAG" "${module_name}: updated but manifest missing; install skipped"
+                    fi
+                else
+                    report "module_update_done" "\"success\":true,\"changed\":false,\"module\":\"${module_name}\",\"repo\":\"${repo_url}\",\"path\":\"${target_path}\",\"old\":\"${old_head:0:8}\",\"new\":\"${new_head:0:8}\""
+                fi
             else
-                report "module_update_done" "\"success\":false,\"repo\":\"${repo_url}\",\"path\":\"${target_path}\""
+                report "module_update_done" "\"success\":false,\"module\":\"${module_name}\",\"repo\":\"${repo_url}\",\"path\":\"${target_path}\",\"old\":\"${old_head:0:8}\""
             fi
             continue
         fi
 
-        logger -t "$LOG_TAG" "New module: cloning ${repo_url} → ${target_path}"
+        logger -t "$LOG_TAG" "New module: cloning ${module_name} from ${repo_url} -> ${target_path}"
         notify_watchdog
 
         mkdir -p "$(dirname "$target_path")"
 
         if git clone "$repo_url" "$target_path" 2>&1 | logger -t "$LOG_TAG"; then
-            report "module_cloned" "\"success\":true,\"repo\":\"${repo_url}\",\"path\":\"${target_path}\""
+            report "module_cloned" "\"success\":true,\"module\":\"${module_name}\",\"repo\":\"${repo_url}\",\"path\":\"${target_path}\""
             fix_permissions "$target_path"
 
             # Fix ownership
@@ -649,7 +676,7 @@ clone_missing_modules() {
                 fi
             fi
         else
-            report "module_cloned" "\"success\":false,\"repo\":\"${repo_url}\",\"path\":\"${target_path}\""
+            report "module_cloned" "\"success\":false,\"module\":\"${module_name}\",\"repo\":\"${repo_url}\",\"path\":\"${target_path}\""
         fi
 
     done < "$modules_conf"

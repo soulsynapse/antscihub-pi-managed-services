@@ -300,25 +300,38 @@ install_modules() {
                 if [[ "$resolved_target" == '~/'* ]]; then
             resolved_target="${REAL_HOME}/${resolved_target:2}"
         fi
+        local module_name
+        module_name="$(basename "${resolved_target%/}")"
 
-        log "Module target resolved: ${target_path} -> ${resolved_target}"
+        log "Module target resolved: ${target_path} -> ${resolved_target} (${module_name})"
 
         local resolved_parent
         resolved_parent="$(dirname "${resolved_target}")"
         ensure_user_dir "$resolved_parent"
 
         if [[ -d "${resolved_target}/.git" ]]; then
-            log "Updating module: ${repo_url} -> ${resolved_target}"
+            log "Updating module ${module_name}: ${repo_url} -> ${resolved_target}"
             local branch="main"
             if [[ -f "${resolved_target}/antscihub.manifest" ]]; then
                 while IFS="=" read -r mkey mval; do
                     [[ "$mkey" == "GIT_BRANCH" ]] && branch="$(echo "$mval" | xargs)"
                 done < "${resolved_target}/antscihub.manifest"
             fi
+            local old_head new_head
+            old_head=$(git_as_user -C "${resolved_target}" rev-parse HEAD 2>/dev/null || echo "unknown")
             if ! update_repo "${resolved_target}" "${repo_url}" "$branch"; then
                 warn "Failed to update or repair ${resolved_target}; continuing"
             elif [[ "$REPO_REPAIRED_BY_RECLONE" == "true" ]]; then
+                log "Module ${module_name} was recloned/repaired; running install"
                 run_module_install "${resolved_target}"
+            else
+                new_head=$(git_as_user -C "${resolved_target}" rev-parse HEAD 2>/dev/null || echo "unknown")
+                if [[ "$old_head" != "$new_head" ]]; then
+                    log "Module ${module_name} updated ${old_head:0:8} -> ${new_head:0:8}; running install"
+                    run_module_install "${resolved_target}"
+                else
+                    log "Module ${module_name} already up to date (${old_head:0:8})"
+                fi
             fi
         elif [[ -e "${resolved_target}" ]]; then
             if [[ -d "${resolved_target}" ]] && [[ -z "$(find "${resolved_target}" -mindepth 1 -maxdepth 1 2>/dev/null)" ]]; then
