@@ -328,10 +328,10 @@ install_modules() {
                 new_head=$(git_as_user -C "${resolved_target}" rev-parse HEAD 2>/dev/null || echo "unknown")
                 if [[ "$old_head" != "$new_head" ]]; then
                     log "Module ${module_name} updated ${old_head:0:8} -> ${new_head:0:8}; running install"
-                    run_module_install "${resolved_target}"
                 else
-                    log "Module ${module_name} already up to date (${old_head:0:8})"
+                    log "Module ${module_name} already up to date (${old_head:0:8}); running install to ensure local tools are current"
                 fi
+                run_module_install "${resolved_target}"
             fi
         elif [[ -e "${resolved_target}" ]]; then
             if [[ -d "${resolved_target}" ]] && [[ -z "$(find "${resolved_target}" -mindepth 1 -maxdepth 1 2>/dev/null)" ]]; then
